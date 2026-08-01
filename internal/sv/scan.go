@@ -116,6 +116,13 @@ type Declaration struct {
 	// one, the same way every port does.
 	Params []Port
 
+	// ReturnType holds a function's return type, pre-formatted via
+	// formatType (e.g. "int", "void", "logic [7:0]") -- empty for a
+	// function with an implicit (unspecified) return type, and for every
+	// other Kind, including KindTask (tasks have no return type in SV, so
+	// there's nothing for the *ast.Task case to source this from).
+	ReturnType string
+
 	// Args holds the argument list for a function/task declaration (nil
 	// for everything else). Reuses Port's Name/Detail shape rather than a
 	// near-duplicate type -- a function argument and a port entry have the
@@ -396,7 +403,8 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent, Prototype: n.Prototype,
-			Args: convertArgs(n.Args),
+			ReturnType: formatType(n.ReturnType),
+			Args:       convertArgs(n.Args),
 		})
 
 	case *ast.Task:
