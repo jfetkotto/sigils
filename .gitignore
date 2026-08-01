@@ -1,0 +1,8 @@
+# compiled binary, if ever built inside the repo (e.g. `go build -o sigils .`)
+/sigils
+
+# go test binaries
+*.test
+
+# editor/OS cruft
+.DS_Store
