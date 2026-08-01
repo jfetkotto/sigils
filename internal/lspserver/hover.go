@@ -70,7 +70,11 @@ func hoverText(d sv.Declaration) string {
 		if d.Prototype {
 			b.WriteString("extern ")
 		}
-		fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args))
+		if d.ReturnType != "" {
+			fmt.Fprintf(&b, "%s %s %s(%s)", d.Kind, d.ReturnType, d.Name, argSummary(d.Args))
+		} else {
+			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args))
+		}
 	case sv.KindPort:
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
 	case sv.KindParameter:

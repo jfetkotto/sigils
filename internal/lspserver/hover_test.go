@@ -144,8 +144,8 @@ endclass
 		t.Fatalf("TextDocumentHover: %v", err)
 	}
 	content, _ := hover.Contents.(protocol.MarkupContent)
-	if !strings.Contains(content.Value, "extern function bar") {
-		t.Fatalf("expected hover text to mention \"extern function bar\", got %q", content.Value)
+	if !strings.Contains(content.Value, "extern function void bar") {
+		t.Fatalf("expected hover text to mention \"extern function void bar\", got %q", content.Value)
 	}
 }
 
@@ -171,8 +171,56 @@ func TestTextDocumentHoverFunctionShowsArgs(t *testing.T) {
 		t.Fatalf("expected a hover result")
 	}
 	content, _ := hover.Contents.(protocol.MarkupContent)
-	if !strings.Contains(content.Value, "function add(int a, int b)") {
-		t.Fatalf("expected hover text to show add's argument types, got %q", content.Value)
+	if !strings.Contains(content.Value, "function int add(int a, int b)") {
+		t.Fatalf("expected hover text to show add's return type and argument types, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverFunctionImplicitReturnType(t *testing.T) {
+	s := newTestServer()
+	src := "module top;\n  function foo(int a);\n  endfunction\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 1, Character: 13},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "function foo(int a)") {
+		t.Fatalf("expected hover text to omit a return type for an implicit-return function, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverTaskNoReturnType(t *testing.T) {
+	s := newTestServer()
+	src := "module top;\n  task foo(int a);\n  endtask\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 1, Character: 8},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "task foo(int a)") {
+		t.Fatalf("expected hover text to show the task with no return type, got %q", content.Value)
 	}
 }
 
