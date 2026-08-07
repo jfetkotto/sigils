@@ -168,6 +168,22 @@ type Declaration struct {
 	// KindEnumMember only), for hover context.
 	EnumTypedef string
 
+	// TypeName holds a port's or variable's declared type's bare name
+	// (Kind == KindPort or KindVariable only; "" otherwise) -- e.g.
+	// "logic" for a plain net, or "ty_bundle" for a struct/union typedef
+	// reference. It's what backs struct-member completion after
+	// "receiver.": Index.StructFields looks TypeName up against the
+	// workspace's typedefs, and a name that turns out to be a builtin
+	// keyword (like "logic") or a non-struct/union typedef is expected to
+	// simply fail to match there -- no special-casing of builtins is
+	// needed here, this is populated unconditionally from ast.Type.Name.
+	// KindParameter isn't covered even though a struct-typed parameter is
+	// possible in principle ("parameter my_struct_t P = ...") --
+	// convertParams never fed this, following Detail's own precedent of
+	// treating parameters separately; left as follow-on work if that gap
+	// turns out to matter in practice.
+	TypeName string
+
 	// Detail holds a human-readable rendering of this declaration's type
 	// (Kind == KindPort: direction+type, e.g. "input logic [7:0]", the
 	// same rendering already used for the enclosing module's own Ports
@@ -363,8 +379,9 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 				Kind: KindPort, Name: port.Name,
 				Line: port.Line, Character: port.Character,
 				EndLine: port.Line, EndCharacter: port.Character + UTF16Len(port.Name),
-				Parent: idx,
-				Detail: portDetail(port.Direction, port.Type),
+				Parent:   idx,
+				Detail:   portDetail(port.Direction, port.Type),
+				TypeName: port.Type.Name,
 			})
 		}
 		for _, param := range n.Params {
@@ -424,7 +441,11 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		// get no such treatment: they're only reachable through the
 		// struct/union type itself (recorded on the Declaration below, as
 		// Fields, for hover display) -- this package still doesn't model
-		// field-access reference resolution ("instance.field").
+		// field-access reference resolution ("instance.field"). Completion
+		// after "instance." is a lighter-weight problem than resolution,
+		// though, and IS handled -- see Declaration.TypeName and
+		// Index.StructFields -- since it only needs the receiver's own
+		// declared type, not the field reference itself.
 		var enumLabels, enumValues []string
 		if e, ok := n.Underlying.(*ast.Enum); ok {
 			enumLabels, enumValues = enumMemberTexts(e.Members)
@@ -462,7 +483,8 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Kind: KindVariable, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
-			Parent: parent,
+			Parent:   parent,
+			TypeName: n.Type.Name,
 		})
 
 	case *ast.Parameter:

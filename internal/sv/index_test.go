@@ -493,6 +493,39 @@ func TestIndexPortsIgnoresNonContainerKind(t *testing.T) {
 	}
 }
 
+func TestIndexStructFields(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef struct packed { logic [7:0] a; logic b; } bus_t;\n")
+
+	fields, ok := ix.StructFields("bus_t")
+	if !ok || len(fields) != 2 || fields[0].Name != "a" || fields[1].Name != "b" {
+		t.Fatalf("StructFields(bus_t) = %+v, %v", fields, ok)
+	}
+}
+
+func TestIndexStructFieldsMissing(t *testing.T) {
+	ix := NewIndex()
+	if _, ok := ix.StructFields("nope"); ok {
+		t.Fatalf("expected no fields for an unknown name")
+	}
+}
+
+func TestIndexStructFieldsIgnoresNonStructTypedef(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef logic [7:0] bus_t;\n")
+	if _, ok := ix.StructFields("bus_t"); ok {
+		t.Fatalf("expected StructFields to ignore a plain alias typedef")
+	}
+}
+
+func TestIndexStructFieldsAcceptsUnion(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef union packed { logic [7:0] a; logic [7:0] b; } u_t;\n")
+	if _, ok := ix.StructFields("u_t"); !ok {
+		t.Fatalf("expected StructFields to accept a union typedef")
+	}
+}
+
 func TestFindDefinitionNoMatchAnywhere(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module top;\nendmodule\n")

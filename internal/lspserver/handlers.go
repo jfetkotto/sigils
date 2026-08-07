@@ -276,27 +276,42 @@ func formatLocations(locs []sv.Location, word string) []protocol.Location {
 // cut permanently unreachable for that prefix.
 const maxSymbolCompletions = 200
 
-// TextDocumentCompletion offers three kinds of completion:
+// TextDocumentCompletion offers four kinds of completion:
 //  1. Named-port-connection completion when the cursor is inside a
 //     module/interface/program instantiation's port-list parens -- see
 //     sv.InstantiationContextAt.
 //  2. Parameter-override completion when the cursor is inside an
 //     instantiation's "#( ... )" parameter list instead -- see
-//     sv.InstantiationParamContextAt. Reuses portCompletionItems
-//     unchanged (it's generic over the []sv.Port it's given); only
-//     "localparam" entries are excluded from the candidates
+//     sv.InstantiationParamContextAt. Reuses portCompletionItems with
+//     wantCallSnippet=true (it's generic over the []sv.Port it's given);
+//     only "localparam" entries are excluded from the candidates
 //     (sv.Index.Params), since those can never legally appear on the
 //     right of ".name(value)" here.
-//  3. Otherwise, general prefix-based identifier completion against every
+//  3. Struct/union member completion when the cursor directly follows
+//     "receiver." and receiver resolves (via sv.Index.HoverInfo, the same
+//     resolution goto-definition and hover already use) to a port or
+//     variable whose own declared type is itself a struct or union
+//     typedef -- see structMemberCompletionItems. Deliberately narrow:
+//     only a *direct* struct/union typedef reference is resolved, not a
+//     chain of plain alias typedefs that eventually names one, not nested
+//     field-of-field access ("a.b.c" where b is itself struct-typed --
+//     sv.Port, reused for sv.Declaration.Fields, has no structured type of
+//     its own to recurse into), and not class member access. Those remain
+//     future work.
+//  4. Otherwise, general prefix-based identifier completion against every
 //     declared symbol in the workspace index (types, functions/tasks,
 //     classes, packages, enum members, ...) -- see sv.Index.CompleteSymbols.
 //     This isn't type- or scope-aware: an enum member from a wholly
 //     unrelated type, or a function that isn't actually reachable from
 //     here, can still show up as a candidate, since confirming reachability
-//     needs the same elaboration this lexical index doesn't do.
+//     needs the same elaboration this lexical index doesn't do. This is
+//     also still what a dot-qualified receiver that ISN'T a resolved
+//     struct/union (a plain "logic" variable, an unresolved name, ...)
+//     falls back to -- an empty typed prefix there (cursor right after the
+//     dot) still means no completions at all, same as any other
+//     empty-prefix request here.
 //
-// No path attempts keyword completion or signal/variable completion (we
-// don't scan variable declarations at all yet).
+// No path attempts keyword completion.
 func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.CompletionParams) (any, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
@@ -307,7 +322,7 @@ func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.
 	if moduleName, connected, ok := sv.InstantiationContextAt(text, line, character); ok {
 		var items []protocol.CompletionItem
 		if ports, ok := s.index.Ports(moduleName); ok {
-			items = s.portCompletionItems(text, line, character, ports, connected)
+			items = s.portCompletionItems(text, line, character, ports, connected, true)
 		}
 		return completionResult(items, false), nil
 	}
@@ -315,8 +330,12 @@ func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.
 	if moduleName, connected, ok := sv.InstantiationParamContextAt(text, line, character); ok {
 		var items []protocol.CompletionItem
 		if params, ok := s.index.Params(moduleName); ok {
-			items = s.portCompletionItems(text, line, character, params, connected)
+			items = s.portCompletionItems(text, line, character, params, connected, true)
 		}
+		return completionResult(items, false), nil
+	}
+
+	if items, ok := s.structMemberCompletionItems(text, params.TextDocument.URI, line, character); ok {
 		return completionResult(items, false), nil
 	}
 
@@ -344,7 +363,17 @@ func completionResult(items []protocol.CompletionItem, truncated bool) any {
 	return items
 }
 
-func (s *Server) portCompletionItems(text string, line, character int, ports []sv.Port, connected map[string]bool) []protocol.CompletionItem {
+// portCompletionItems renders ports as completion items to fill a
+// ".name(...)" connection slot at an instantiation site (branches 1 and 2
+// of TextDocumentCompletion) or, when wantCallSnippet is false, a bare
+// ".name" struct/union field-access position (branch 3) -- the same
+// []sv.Port shape covers both a module's port list and a struct's field
+// list (see sv.Declaration.Fields), so this rendering is fully generic
+// over which one it's given. wantCallSnippet controls only the snippet
+// body appended after the name when the client supports snippets: true
+// appends "($0)" (there's always a value to fill in a connection), false
+// appends nothing at all (a struct field reference has no parens).
+func (s *Server) portCompletionItems(text string, line, character int, ports []sv.Port, connected map[string]bool, wantCallSnippet bool) []protocol.CompletionItem {
 	// An explicit TextEdit (rather than InsertText) makes the replaced
 	// range unambiguous: the client already inserted the "." that
 	// triggered completion into the buffer before this request was even
@@ -372,7 +401,7 @@ func (s *Server) portCompletionItems(text string, line, character int, ports []s
 		}
 
 		var newText string
-		if snippets {
+		if snippets && wantCallSnippet {
 			newText = fmt.Sprintf("%s%s($0)", leadingDot, p.Name)
 			format := protocol.InsertTextFormatSnippet
 			item.InsertTextFormat = &format
@@ -383,6 +412,43 @@ func (s *Server) portCompletionItems(text string, line, character int, ports []s
 		items = append(items, item)
 	}
 	return items
+}
+
+// structMemberCompletionItems offers completion for "receiver." where
+// receiver is a port or local variable whose own declared type directly
+// names a struct or union typedef -- e.g. completing "st_bundle." to that
+// struct's field names. It resolves receiver the same way hover does
+// (sv.WordAt + sv.QualifierAt + sv.Index.HoverInfo, passing the ORIGINAL
+// cursor line/character for scope resolution, not receiver's own start
+// column -- see hover.go's identical pattern) rather than introducing a
+// second resolver, then looks its Declaration.TypeName up as a
+// struct/union typedef via sv.Index.StructFields. ok is false whenever
+// this path doesn't apply at all (no dot immediately precedes the typed
+// prefix, no identifier immediately precedes the dot, receiver doesn't
+// resolve, or its type isn't a struct/union typedef) -- the caller falls
+// back to general symbol completion in that case, not an empty result,
+// since a bare "." after something else entirely (a plain "logic"
+// variable, an unresolved name) is still a valid, if unscoped, completion
+// request, same as before this existed.
+func (s *Server) structMemberCompletionItems(text, uri string, line, character int) ([]protocol.CompletionItem, bool) {
+	prefixStart, hasDot := sv.CompletionEditRange(text, line, character)
+	if !hasDot {
+		return nil, false
+	}
+	receiver, receiverStart, ok := sv.WordAt(text, line, prefixStart-1)
+	if !ok {
+		return nil, false
+	}
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	decl, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || decl.TypeName == "" {
+		return nil, false
+	}
+	fields, ok := s.index.StructFields(decl.TypeName)
+	if !ok {
+		return nil, false
+	}
+	return s.portCompletionItems(text, line, character, fields, nil, false), true
 }
 
 // symbolCompletionItems also reports whether the result was truncated to

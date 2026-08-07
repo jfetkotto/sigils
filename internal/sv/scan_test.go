@@ -414,6 +414,20 @@ func TestScanDeclarationsPortDeclarationHasDetail(t *testing.T) {
 	}
 }
 
+func TestScanDeclarationsPortCapturesTypeName(t *testing.T) {
+	src := "module leaf(input logic clk, input bus_t b);\nendmodule\n"
+	decls := ScanDeclarations("test.sv", src)
+
+	clk := findDecl(t, decls, "clk")
+	if clk.TypeName != "logic" {
+		t.Fatalf("clk.TypeName = %q, want \"logic\"", clk.TypeName)
+	}
+	b := findDecl(t, decls, "b")
+	if b.TypeName != "bus_t" {
+		t.Fatalf("b.TypeName = %q, want \"bus_t\"", b.TypeName)
+	}
+}
+
 func TestScanDeclarationsContainerParamsExcludesLocalParams(t *testing.T) {
 	src := "module leaf #(parameter int WIDTH = 8, localparam int FIXED = 1) ();\nendmodule\n"
 	decls := ScanDeclarations("test.sv", src)
@@ -747,9 +761,15 @@ func TestScanDeclarationsTracksVariables(t *testing.T) {
 	if data.Kind != KindVariable || decls[data.Parent].Name != "top" {
 		t.Fatalf("unexpected data: %+v", data)
 	}
+	if data.TypeName != "logic" {
+		t.Fatalf("data.TypeName = %q, want \"logic\"", data.TypeName)
+	}
 	bus := findDecl(t, decls, "bus")
 	if bus.Kind != KindVariable {
 		t.Fatalf("unexpected bus (a user-defined-type variable): %+v", bus)
+	}
+	if bus.TypeName != "bus_t" {
+		t.Fatalf("bus.TypeName = %q, want \"bus_t\"", bus.TypeName)
 	}
 }
 

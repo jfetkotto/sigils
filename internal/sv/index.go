@@ -703,6 +703,30 @@ func (ix *Index) Params(name string) ([]Port, bool) {
 	return nil, false
 }
 
+// StructFields returns the field list of a struct or union typedef named
+// typeName, if one exists in the index (the first match wins if there
+// happen to be duplicates, the same simplification Ports/Params already
+// make). Used for struct-member completion after "receiver." once the
+// receiver's own declared type name has been resolved (see Declaration.
+// TypeName) -- typeName not matching anything at all (a builtin keyword,
+// or a non-struct/union typedef) isn't a special case here, just an
+// ordinary "not found".
+func (ix *Index) StructFields(typeName string) ([]Port, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	for _, r := range ix.byName[typeName] {
+		d := ix.byURI[r.uri][r.idx]
+		if d.Kind != KindTypedef {
+			continue
+		}
+		switch d.TypedefKind {
+		case "struct", "union":
+			return d.Fields, true
+		}
+	}
+	return nil, false
+}
+
 // Occurrences returns every identifier occurrence of name across the
 // whole index, unrestricted -- see Index's doc comment for why this is
 // pre-built rather than scanned at request time. ScopedOccurrences is
