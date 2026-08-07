@@ -764,12 +764,18 @@ func TestScanDeclarationsTracksVariables(t *testing.T) {
 	if data.TypeName != "logic" {
 		t.Fatalf("data.TypeName = %q, want \"logic\"", data.TypeName)
 	}
+	if data.Detail != "logic [7:0]" {
+		t.Fatalf("data.Detail = %q, want \"logic [7:0]\"", data.Detail)
+	}
 	bus := findDecl(t, decls, "bus")
 	if bus.Kind != KindVariable {
 		t.Fatalf("unexpected bus (a user-defined-type variable): %+v", bus)
 	}
 	if bus.TypeName != "bus_t" {
 		t.Fatalf("bus.TypeName = %q, want \"bus_t\"", bus.TypeName)
+	}
+	if bus.Detail != "bus_t" {
+		t.Fatalf("bus.Detail = %q, want \"bus_t\"", bus.Detail)
 	}
 }
 

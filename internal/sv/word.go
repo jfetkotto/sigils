@@ -69,6 +69,25 @@ func QualifierAt(text string, line, wordStart int) (string, bool) {
 	return string(lineText[start:end]), true
 }
 
+// DotReceiverAt returns the identifier immediately before a "." that
+// directly precedes wordStart (a UTF-16 column, as WordAt returns) on the
+// given line, if any -- e.g. for "link.addr" with wordStart at "addr", it
+// returns ("link", <link's start column>, true). Mirrors QualifierAt's
+// shape but for "." instead of "::", used to detect struct/union
+// field-access hover and hand the receiver off to the same resolution
+// hover already does for any other identifier -- see structFieldHover.
+func DotReceiverAt(text string, line, wordStart int) (receiver string, start int, ok bool) {
+	lineText, ok := lineAt(text, line)
+	if !ok || wordStart < 1 {
+		return "", 0, false
+	}
+	cursor := svtoken.RuneColumn(lineText, wordStart)
+	if cursor < 1 || lineText[cursor-1] != '.' {
+		return "", 0, false
+	}
+	return WordAt(text, line, wordStart-1)
+}
+
 // CompletionEditRange computes what a completion at (line, character)
 // should replace: the run of identifier characters immediately preceding
 // the cursor (its start; zero-width, i.e. start == character, if there's

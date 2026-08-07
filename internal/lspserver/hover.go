@@ -20,7 +20,9 @@ import (
 // or a parameter override's name (".WIDTH(") is checked first, mirroring
 // resolveWordAt's identical precedence -- see
 // sv.Index.InstantiationPortInfo's doc comment for why HoverInfo would
-// never find either on its own.
+// never find either on its own. A struct/union field access
+// ("receiver.field") is checked next, for the same reason -- see
+// structFieldHover.
 func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
@@ -36,15 +38,21 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 	if moduleName, ok := sv.InstantiationPortNameAt(text, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
 			return &protocol.Hover{
-				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: hoverText(decl)},
+				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
 			}, nil
 		}
 	}
 	if moduleName, ok := sv.InstantiationParamNameAt(text, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
 			return &protocol.Hover{
-				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: hoverText(decl)},
+				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
 			}, nil
+		}
+	}
+
+	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
+		if hover, ok := s.structFieldHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
+			return hover, nil
 		}
 	}
 
@@ -56,8 +64,68 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 	}
 
 	return &protocol.Hover{
-		Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: hoverText(decl)},
+		Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
 	}, nil
+}
+
+// structFieldHover resolves receiver (the identifier immediately before a
+// "." that itself immediately precedes word, see sv.DotReceiverAt) to its
+// declared type and, if that type is a struct/union typedef with a field
+// named word, renders hover text for that field specifically. ok is false
+// whenever this doesn't apply (receiver doesn't resolve, isn't
+// struct/union-typed, or has no field named word) -- the caller then
+// falls back to HoverInfo's plain scope-chain lookup for word, same as
+// before this existed. That fallback matters: field-access reference
+// resolution isn't modelled here (see scan.go's *ast.Typedef comment), so
+// without this check word would always resolve that way, which can
+// silently land on an unrelated declaration that merely happens to share
+// the field's name (the same "coincidence" struct-member completion had
+// before sv.Index.StructFields, reused here).
+func (s *Server) structFieldHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.TypeName == "" {
+		return nil, false
+	}
+	fields, ok := s.index.StructFields(recv.TypeName)
+	if !ok {
+		return nil, false
+	}
+	for _, f := range fields {
+		if f.Name == word {
+			return &protocol.Hover{
+				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: fieldHoverText(f)},
+			}, true
+		}
+	}
+	return nil, false
+}
+
+// fieldHoverText renders a single struct/union field the same way a port
+// entry renders (portEntry reused verbatim -- a field and a port share
+// the identical name+type-detail shape, see sv.Declaration.Fields).
+func fieldHoverText(f sv.Port) string {
+	return "```systemverilog\n" + portEntry(f) + "\n```"
+}
+
+// hoverContents renders d the same way hoverText always has, then, if d's
+// own declared type (TypeName, Kind == KindPort or KindVariable only)
+// itself resolves to a typedef, appends that typedef's own hover
+// rendering as a second fenced block -- e.g. hovering a struct-typed
+// variable shows both "pkg_types::bus_t link" AND the struct's expanded
+// field list, the same expansion hovering "bus_t" directly already
+// produces via typedefText, rather than requiring a second hover request
+// on the type name itself to see what it contains.
+func (s *Server) hoverContents(d sv.Declaration) string {
+	value := hoverText(d)
+	if d.TypeName == "" {
+		return value
+	}
+	td, ok := s.index.Typedef(d.TypeName)
+	if !ok {
+		return value
+	}
+	return value + "\n\n" + hoverText(td)
 }
 
 func hoverText(d sv.Declaration) string {
@@ -75,7 +143,7 @@ func hoverText(d sv.Declaration) string {
 		} else {
 			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args))
 		}
-	case sv.KindPort:
+	case sv.KindPort, sv.KindVariable:
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
 	case sv.KindParameter:
 		fmt.Fprintf(&b, "parameter %s", parameterText(d))

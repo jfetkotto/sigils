@@ -88,6 +88,40 @@ func TestQualifierAtAtStartOfLine(t *testing.T) {
 	}
 }
 
+func TestDotReceiverAtFindsReceiverBeforeDot(t *testing.T) {
+	_, start, ok := WordAt("link.addr;", 0, 7)
+	if !ok || start != 5 {
+		t.Fatalf("WordAt setup failed: start=%d ok=%v", start, ok)
+	}
+	receiver, receiverStart, ok := DotReceiverAt("link.addr;", 0, start)
+	if !ok || receiver != "link" || receiverStart != 0 {
+		t.Fatalf("DotReceiverAt = %q, %d, %v; want \"link\", 0, true", receiver, receiverStart, ok)
+	}
+}
+
+func TestDotReceiverAtNoneForPlainIdentifier(t *testing.T) {
+	_, start, _ := WordAt("foo bar;", 0, 1)
+	if _, _, ok := DotReceiverAt("foo bar;", 0, start); ok {
+		t.Fatalf("expected no receiver for a plain identifier")
+	}
+}
+
+func TestDotReceiverAtRequiresSingleDot(t *testing.T) {
+	// "::" is QualifierAt's territory, not DotReceiverAt's -- a single "."
+	// glued onto one of its colons must not be mistaken for the field
+	// receiver dot.
+	_, start, _ := WordAt("pkg::foo;", 0, 6)
+	if _, _, ok := DotReceiverAt("pkg::foo;", 0, start); ok {
+		t.Fatalf("expected no dot-receiver for a \"::\"-qualified identifier")
+	}
+}
+
+func TestDotReceiverAtAtStartOfLine(t *testing.T) {
+	if _, _, ok := DotReceiverAt("foo", 0, 0); ok {
+		t.Fatalf("expected no dot-receiver when the word starts at column 0")
+	}
+}
+
 func TestCompletionEditRangeRightAfterDot(t *testing.T) {
 	start, hasDot := CompletionEditRange("    .", 0, 5)
 	if start != 5 || !hasDot {

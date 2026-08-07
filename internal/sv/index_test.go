@@ -526,6 +526,43 @@ func TestIndexStructFieldsAcceptsUnion(t *testing.T) {
 	}
 }
 
+func TestIndexTypedefReturnsFullDeclaration(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef struct packed { logic [7:0] a; } bus_t;\n")
+
+	d, ok := ix.Typedef("bus_t")
+	if !ok || d.Kind != KindTypedef || d.TypedefKind != "struct" || len(d.Fields) != 1 {
+		t.Fatalf("Typedef(bus_t) = %+v, %v", d, ok)
+	}
+}
+
+func TestIndexTypedefMissing(t *testing.T) {
+	ix := NewIndex()
+	if _, ok := ix.Typedef("nope"); ok {
+		t.Fatalf("expected no typedef for an unknown name")
+	}
+}
+
+func TestIndexTypedefAcceptsAliasAndEnum(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef logic [7:0] byte_t;\ntypedef enum {IDLE} state_t;\n")
+
+	if _, ok := ix.Typedef("byte_t"); !ok {
+		t.Fatalf("expected Typedef to accept a plain alias typedef")
+	}
+	if _, ok := ix.Typedef("state_t"); !ok {
+		t.Fatalf("expected Typedef to accept an enum typedef")
+	}
+}
+
+func TestIndexTypedefIgnoresNonTypedefKind(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module bus_t;\nendmodule\n")
+	if _, ok := ix.Typedef("bus_t"); ok {
+		t.Fatalf("expected Typedef to ignore a module sharing a typedef's name")
+	}
+}
+
 func TestFindDefinitionNoMatchAnywhere(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module top;\nendmodule\n")
