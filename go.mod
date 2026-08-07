@@ -4,7 +4,7 @@ go 1.26.4
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/jfetkotto/svparse v0.1.2
+	github.com/jfetkotto/svparse v0.1.3
 	github.com/tliron/commonlog v0.2.8
 	github.com/tliron/glsp v0.2.2
 )
