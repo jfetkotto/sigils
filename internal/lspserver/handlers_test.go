@@ -1001,3 +1001,181 @@ func TestCompletionItemKindForNewDeclarationKinds(t *testing.T) {
 		}
 	}
 }
+
+// structMemberCompletionSrc is a struct typedef with a member
+// (unique_field) declared nowhere else in the workspace, consumed as a
+// local variable's type -- the exact shape of the original bug report's
+// repro, where a struct member was only reachable when some unrelated
+// declaration elsewhere happened to share its name.
+const structMemberCompletionSrc = "typedef struct packed { logic [7:0] unique_field; logic flag; } bus_t;\n" +
+	"module top;\n" +
+	"  bus_t st_bundle;\n" +
+	"  st_bundle.\n" +
+	"endmodule\n"
+
+func TestTextDocumentCompletionSuggestsStructMembersEmptyPrefix(t *testing.T) {
+	s := newTestServer()
+	uri := "file:///a.sv"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: structMemberCompletionSrc},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  st_bundle." on line 3 ends at character 12 (right after the dot,
+	// no typed prefix yet).
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 3, Character: 12},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 struct-member items, got %#v", result)
+	}
+	if items[0].Label != "unique_field" || items[1].Label != "flag" {
+		t.Fatalf("expected [unique_field, flag], got [%s, %s]", items[0].Label, items[1].Label)
+	}
+	for _, item := range items {
+		if item.Kind == nil || *item.Kind != protocol.CompletionItemKindField {
+			t.Fatalf("expected CompletionItemKindField for %s, got %+v", item.Label, item.Kind)
+		}
+	}
+	if items[0].Detail == nil || *items[0].Detail != "logic [7:0]" {
+		t.Fatalf("expected unique_field detail \"logic [7:0]\", got %+v", items[0].Detail)
+	}
+	if items[1].Detail == nil || *items[1].Detail != "logic" {
+		t.Fatalf("expected flag detail \"logic\", got %+v", items[1].Detail)
+	}
+	edit, ok := items[0].TextEdit.(*protocol.TextEdit)
+	if !ok {
+		t.Fatalf("expected a TextEdit, got %#v", items[0].TextEdit)
+	}
+	if edit.NewText != "unique_field" {
+		t.Fatalf("expected newText \"unique_field\" with no leading dot, got %q", edit.NewText)
+	}
+	if edit.Range.Start.Character != 12 || edit.Range.End.Character != 12 {
+		t.Fatalf("expected a zero-width edit range at the cursor, got %+v", edit.Range)
+	}
+}
+
+func TestTextDocumentCompletionSuggestsStructMembersPartialPrefix(t *testing.T) {
+	s := newTestServer()
+	uri := "file:///a.sv"
+	src := "typedef struct packed { logic [7:0] unique_field; logic flag; } bus_t;\n" +
+		"module top;\n" +
+		"  bus_t st_bundle;\n" +
+		"  st_bundle.uni\n" +
+		"endmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  st_bundle.uni" on line 3 ends at character 15.
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 3, Character: 15},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	// portCompletionItems (reused here) doesn't filter candidates by the
+	// typed prefix -- the client does that -- so both fields are still
+	// present; what matters is that the edit range for the matching one
+	// covers exactly the typed "uni".
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 struct-member items, got %#v", result)
+	}
+	if items[0].Label != "unique_field" {
+		t.Fatalf("expected unique_field first, got %#v", result)
+	}
+	edit, ok := items[0].TextEdit.(*protocol.TextEdit)
+	if !ok {
+		t.Fatalf("expected a TextEdit, got %#v", items[0].TextEdit)
+	}
+	if edit.NewText != "unique_field" {
+		t.Fatalf("expected newText \"unique_field\", got %q", edit.NewText)
+	}
+	if edit.Range.Start.Character != 12 || edit.Range.End.Character != 15 {
+		t.Fatalf("expected edit range [12,15) covering \"uni\", got %+v", edit.Range)
+	}
+}
+
+func TestTextDocumentCompletionStructMemberNoCallSnippetEvenWithSnippetSupport(t *testing.T) {
+	s := newTestServer()
+	raw := `{"capabilities":{"textDocument":{"completion":{"completionItem":{"snippetSupport":true}}}}}`
+	var params protocol.InitializeParams
+	if err := json.Unmarshal([]byte(raw), &params); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Initialize(nil, &params); err != nil {
+		t.Fatalf("Initialize: %v", err)
+	}
+
+	uri := "file:///a.sv"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: structMemberCompletionSrc},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 3, Character: 12},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 struct-member items, got %#v", result)
+	}
+	for _, item := range items {
+		if item.InsertTextFormat != nil {
+			t.Fatalf("expected no InsertTextFormat for %s (no call snippet for a field), got %+v", item.Label, item.InsertTextFormat)
+		}
+		edit, ok := item.TextEdit.(*protocol.TextEdit)
+		if !ok {
+			t.Fatalf("expected a TextEdit, got %#v", item.TextEdit)
+		}
+		if strings.Contains(edit.NewText, "(") {
+			t.Fatalf("expected no call-snippet suffix in newText, got %q", edit.NewText)
+		}
+	}
+}
+
+func TestTextDocumentCompletionStructMemberFallsBackToNilWhenReceiverIsNotAStruct(t *testing.T) {
+	s := newTestServer()
+	uri := "file:///a.sv"
+	src := "module top;\n  logic sig;\n  sig.\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  sig." on line 2 ends at character 6 (right after the dot).
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 2, Character: 6},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	if result != nil {
+		t.Fatalf("expected a nil result for a non-struct receiver with an empty prefix, got %#v", result)
+	}
+}
