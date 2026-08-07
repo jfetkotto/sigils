@@ -187,11 +187,14 @@ type Declaration struct {
 	// Detail holds a human-readable rendering of this declaration's type
 	// (Kind == KindPort: direction+type, e.g. "input logic [7:0]", the
 	// same rendering already used for the enclosing module's own Ports
-	// list entry, see Port.Detail/portDetail; Kind == KindParameter: just
-	// the type, e.g. "int", "" if untyped -- see Default below for the
-	// piece portEntry-style rendering can't fold in) -- attached to the
-	// declaration's own individual entry (not just its container's list)
-	// so hovering it, wherever it's referenced, has something to show.
+	// list entry, see Port.Detail/portDetail; Kind == KindVariable: just
+	// the type, e.g. "logic [7:0]" or "pkg_types::bus_t" -- formatType's
+	// rendering of TypeName, since a plain variable has no direction to
+	// prefix; Kind == KindParameter: just the type, e.g. "int", "" if
+	// untyped -- see Default below for the piece portEntry-style
+	// rendering can't fold in) -- attached to the declaration's own
+	// individual entry (not just its container's list) so hovering it,
+	// wherever it's referenced, has something to show.
 	Detail string
 
 	// Default holds a parameter's default value as written (Kind ==
@@ -484,6 +487,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Line: n.Line, Character: n.Character,
 			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
 			Parent:   parent,
+			Detail:   formatType(n.Type),
 			TypeName: n.Type.Name,
 		})
 

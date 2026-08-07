@@ -273,6 +273,164 @@ func TestTextDocumentHoverPortReferenceInsideModuleBody(t *testing.T) {
 	}
 }
 
+func TestTextDocumentHoverVariableShowsTypeAndExpandsStruct(t *testing.T) {
+	s := newTestServer()
+	src := "typedef struct packed {\n  logic [3:0] addr;\n  logic [7:0] data;\n} bus_t;\n" +
+		"module top;\n  bus_t link;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  bus_t link;"
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 5, Character: protocol.UInteger(strings.Index(line, "link"))},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result")
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "bus_t link") {
+		t.Fatalf("expected hover text to show link's own declared type, got %q", content.Value)
+	}
+	want := "typedef struct packed {\n  logic [3:0] addr;\n  logic [7:0] data;\n} bus_t"
+	if !strings.Contains(content.Value, want) {
+		t.Fatalf("expected hover text to also expand what bus_t contains, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverPlainVariableShowsTypeNoExpansion(t *testing.T) {
+	s := newTestServer()
+	src := "module top;\n  logic [7:0] data;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  logic [7:0] data;"
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 1, Character: protocol.UInteger(strings.Index(line, "data"))},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if content.Value != "```systemverilog\nlogic [7:0] data\n```" {
+		t.Fatalf("expected a plain (non-struct) variable's hover to show only its own type with no expansion, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverStructFieldResolvesThroughReceiverType(t *testing.T) {
+	// The shadowing local "addr" deliberately has a DIFFERENT type
+	// (int) than the struct's own "addr" field (logic [3:0]) --
+	// distinguishing genuine struct-field resolution from a hover that
+	// merely fell through to a same-named declaration elsewhere in scope
+	// by coincidence, the exact gap this test guards against.
+	s := newTestServer()
+	src := "typedef struct packed {\n  logic [3:0] addr;\n  logic [7:0] data;\n} bus_t;\n" +
+		"module top;\n  bus_t link;\n  int addr;\n  assign addr = link.addr;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  assign addr = link.addr;"
+	fieldChar := strings.LastIndex(line, "addr") // the "addr" after "link."
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 7, Character: protocol.UInteger(fieldChar)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result")
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if content.Value != "```systemverilog\nlogic [3:0] addr\n```" {
+		t.Fatalf("expected hover on \"link.addr\" to resolve to bus_t's own addr field, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverPlainShadowedNameStillResolvesToLocalDeclaration(t *testing.T) {
+	// The other half of the coincidence check: the LHS "addr" (not
+	// preceded by a dot) must still resolve to the local variable, not be
+	// accidentally swallowed by the new struct-field path.
+	s := newTestServer()
+	src := "typedef struct packed {\n  logic [3:0] addr;\n} bus_t;\n" +
+		"module top;\n  bus_t link;\n  int addr;\n  assign addr = link.addr;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  assign addr = link.addr;"
+	lhsChar := strings.Index(line, "addr")
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 6, Character: protocol.UInteger(lhsChar)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if content.Value != "```systemverilog\nint addr\n```" {
+		t.Fatalf("expected the plain (non-dotted) \"addr\" to still resolve to the local int variable, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverStructFieldFallsBackWhenReceiverIsNotAStruct(t *testing.T) {
+	s := newTestServer()
+	// "sig.other" isn't meaningful SV (sig is a plain logic, not a
+	// struct/union) -- WordAt/DotReceiverAt work on raw text, so this
+	// still reaches structFieldHover, which must recognize sig's type
+	// ("logic") doesn't resolve via StructFields and fall through to
+	// ordinary word resolution for "other" (a real declaration elsewhere
+	// in the same module) rather than returning no hover at all.
+	src := "module top;\n  logic sig;\n  logic other;\n  assign sig = sig.other;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  assign sig = sig.other;"
+	fieldChar := strings.LastIndex(line, "other")
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 3, Character: protocol.UInteger(fieldChar)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result")
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "logic other") {
+		t.Fatalf("expected \"sig.other\" to fall through to ordinary hover on \"other\", got %q", content.Value)
+	}
+}
+
 func TestTextDocumentHoverParameterOverrideShowsTypeAndDefault(t *testing.T) {
 	s := newTestServer()
 	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{

@@ -727,6 +727,25 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 	return nil, false
 }
 
+// Typedef returns the full Declaration of a typedef named name, if one
+// exists in the index (first match wins, the same simplification Ports/
+// Params/StructFields already make). Unlike StructFields, this isn't
+// filtered to struct/union -- it's used by hover to render a variable's
+// or port's declared type as a full expansion (e.g. showing a struct's
+// member list, the same way hovering the typedef itself does) whenever
+// that type turns out to be a typedef, whatever kind it is.
+func (ix *Index) Typedef(name string) (Declaration, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	for _, r := range ix.byName[name] {
+		d := ix.byURI[r.uri][r.idx]
+		if d.Kind == KindTypedef {
+			return d, true
+		}
+	}
+	return Declaration{}, false
+}
+
 // Occurrences returns every identifier occurrence of name across the
 // whole index, unrestricted -- see Index's doc comment for why this is
 // pre-built rather than scanned at request time. ScopedOccurrences is
