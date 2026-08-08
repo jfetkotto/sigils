@@ -1171,3 +1171,41 @@ func TestScanSkipsPositionalConnectionsAndOverrides(t *testing.T) {
 		t.Fatalf("expected no connections for positional entries, got %+v", conns)
 	}
 }
+
+// IsIdentifier gates rename: a name it accepts gets written into the user's
+// source. It must therefore accept exactly what svparse's lexer will tokenize
+// back as an identifier -- a looser rule (unicode.IsLetter) accepts a name the
+// lexer then tags KindInvalid, so the rename produces source that no longer
+// tokenizes and a symbol that can never be found again.
+func TestIsIdentifierMatchesTheLexer(t *testing.T) {
+	cases := []struct {
+		name string
+		want bool
+	}{
+		{"clk", true},
+		{"_under", true},
+		{"a$b", true},
+		{"n0", true},
+		{"", false},
+		{"0start", false},
+		{"has space", false},
+		{"module", false}, // reserved word
+		{"café", false},
+		{"naïve_sig", false},
+		{"Ω", false},
+	}
+	for _, tc := range cases {
+		if got := IsIdentifier(tc.name); got != tc.want {
+			t.Errorf("IsIdentifier(%q) = %v, want %v", tc.name, got, tc.want)
+		}
+		if !tc.want {
+			continue
+		}
+		// Anything accepted must round-trip through the lexer as one
+		// identifier token, which is the property that actually matters.
+		occs := FindOccurrences(tc.name+" ;", tc.name)
+		if len(occs) != 1 {
+			t.Errorf("IsIdentifier(%q) accepted it, but the lexer found %d occurrences of it", tc.name, len(occs))
+		}
+	}
+}

@@ -742,3 +742,101 @@ func TestTextDocumentDocumentHighlightNoWordReturnsNil(t *testing.T) {
 		t.Fatalf("expected nil highlights, got %+v", highlights)
 	}
 }
+
+// A file-scope prototype -- a DPI import, say -- has no enclosing container,
+// so it can only ever resolve by the cursor landing inside the declaration's
+// own span. That made it a canary for prototypes being given a zero-width
+// span: the span contained no position at all, including the name's own
+// first column, so the scope-chain walk had nothing to fall back on
+// (KindFunction is not globally referenceable by bare name) and both hover
+// and goto-definition returned nothing at all.
+func TestHoverAndDefinitionOnFileScopeDPIImport(t *testing.T) {
+	s := newTestServer()
+	const uri = "file:///dpi.sv"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{
+			URI: uri, LanguageID: "systemverilog", Version: 1,
+			Text: "import \"DPI-C\" function void c_foo(input int x);\nmodule top;\nendmodule\n",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// "c_foo" starts at column 30 of line 0.
+	pos := protocol.Position{Line: 0, Character: 32}
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     pos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result for a file-scope DPI import")
+	}
+	content := hover.Contents.(protocol.MarkupContent)
+	if !strings.Contains(content.Value, "c_foo") {
+		t.Errorf("hover text %q does not mention c_foo", content.Value)
+	}
+
+	def, err := s.TextDocumentDefinition(nil, &protocol.DefinitionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     pos,
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentDefinition: %v", err)
+	}
+	locs, ok := def.([]protocol.Location)
+	if !ok || len(locs) == 0 {
+		t.Fatalf("expected a definition for a file-scope DPI import, got %#v", def)
+	}
+	if locs[0].Range.Start.Line != 0 {
+		t.Errorf("definition points at line %d, want 0", locs[0].Range.Start.Line)
+	}
+}
+
+// LSP requires a documentSymbol's selectionRange to be contained in its
+// range. A prototype whose span collapsed to zero width violated that for
+// every extern/pure-virtual/DPI declaration.
+func TestDocumentSymbolPrototypeSelectionRangeInsideRange(t *testing.T) {
+	s := newTestServer()
+	const uri = "file:///proto.sv"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{
+			URI: uri, LanguageID: "systemverilog", Version: 1,
+			Text: "class c;\n  extern function void bar();\nendclass\n",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	result, err := s.TextDocumentDocumentSymbol(nil, &protocol.DocumentSymbolParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentDocumentSymbol: %v", err)
+	}
+	syms, ok := result.([]protocol.DocumentSymbol)
+	if !ok || len(syms) == 0 {
+		t.Fatalf("expected document symbols, got %#v", result)
+	}
+	assertSelectionRangeContained(t, syms)
+}
+
+func assertSelectionRangeContained(t *testing.T, syms []protocol.DocumentSymbol) {
+	t.Helper()
+	for _, sym := range syms {
+		sel, rng := sym.SelectionRange, sym.Range
+		beforeStart := sel.Start.Line < rng.Start.Line ||
+			(sel.Start.Line == rng.Start.Line && sel.Start.Character < rng.Start.Character)
+		afterEnd := sel.End.Line > rng.End.Line ||
+			(sel.End.Line == rng.End.Line && sel.End.Character > rng.End.Character)
+		if beforeStart || afterEnd {
+			t.Errorf("symbol %q: selectionRange %+v is not contained in range %+v", sym.Name, sel, rng)
+		}
+		assertSelectionRangeContained(t, sym.Children)
+	}
+}
