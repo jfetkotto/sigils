@@ -18,7 +18,6 @@ package sv
 import (
 	"strconv"
 	"strings"
-	"unicode"
 
 	"github.com/jfetkotto/svparse/ast"
 	"github.com/jfetkotto/svparse/lexer"
@@ -732,31 +731,31 @@ func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 	return out
 }
 
-func isIdentStart(r rune) bool {
-	return unicode.IsLetter(r) || r == '_'
-}
+// isIdentStart/isIdentChar defer to svparse/token rather than defining a
+// rule of their own. They used to use unicode.IsLetter/IsDigit, a looser
+// approximation than the ASCII-only production svparse's lexer actually
+// implements (LRM Annex A: [a-zA-Z_][a-zA-Z0-9_$]*), and the two disagreeing
+// is not a cosmetic difference: these predicates decide what word the cursor
+// sits on and, via IsIdentifier, whether a rename target is writable, so
+// accepting a name the lexer will reject means renaming a symbol into text
+// that no longer tokenizes -- the symbol then can't be found again and the
+// file grows a diagnostic where the rename landed.
+func isIdentStart(r rune) bool { return svtoken.IsIdentStart(r) }
 
-func isIdentChar(r rune) bool {
-	return unicode.IsLetter(r) || unicode.IsDigit(r) || r == '_' || r == '$'
-}
+func isIdentChar(r rune) bool { return svtoken.IsIdentChar(r) }
 
-// IsIdentifier reports whether name is a valid SV identifier by this
-// package's own lexical rules -- useful for validating a proposed rename
-// target before generating a WorkspaceEdit for it. A reserved word (see
-// IsKeyword) is rejected too: it's lexically identifier-shaped, but
-// renaming something TO e.g. "logic" would produce source no SV compiler
-// accepts.
+// IsIdentifier reports whether name is spelled as a valid SV identifier and
+// is not a reserved word -- for validating a proposed rename target before
+// generating a WorkspaceEdit for it. A keyword is rejected even though it's
+// lexically identifier-shaped: renaming something TO e.g. "logic" would
+// produce source no SV compiler accepts.
+//
+// An escaped identifier ("\foo.bar ", LRM 5.6.1) is a legal SV name that
+// this rejects, since it isn't spelled this way -- renaming to one would
+// also need the trailing space the escape form requires, so it's left
+// unsupported rather than half-supported.
 func IsIdentifier(name string) bool {
-	runes := []rune(name)
-	if len(runes) == 0 || !isIdentStart(runes[0]) {
-		return false
-	}
-	for _, r := range runes[1:] {
-		if !isIdentChar(r) {
-			return false
-		}
-	}
-	return !IsKeyword(name)
+	return svtoken.IsIdentifier(name) && !IsKeyword(name)
 }
 
 // IsKeyword reports whether name is one of SystemVerilog's reserved words
