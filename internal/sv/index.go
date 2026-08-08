@@ -259,15 +259,9 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	return touchedURIs
 }
 
-// recordDependencies replaces uri's dependency set with deps (the paths an
-// IncludeResolver reported resolving during uri's most recent scan) -- a
-// no-op with an empty/nil deps for a scan that used none.
-func (ix *Index) recordDependencies(uri string, deps []string) {
-	ix.mu.Lock()
-	defer ix.mu.Unlock()
-	ix.recordDependenciesLocked(uri, deps)
-}
-
+// recordDependenciesLocked replaces uri's dependency set with deps (the
+// paths an IncludeResolver reported resolving during uri's most recent
+// scan) -- clearing the entry entirely for a scan that resolved none.
 func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 	if len(deps) == 0 {
 		delete(ix.dependsOn, uri)
@@ -930,20 +924,26 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 	return out
 }
 
-// CompleteSymbols returns every distinct declared name starting with
-// prefix, across the whole index, for general identifier completion
-// (types, functions, tasks, classes, packages, enum members, ...). It's
-// deliberately not scope-restricted the way FindDefinition is: every
-// matching name anywhere in the workspace is a candidate, since narrowing
-// that down correctly would need the same reachability information a real
-// elaborator has and this lexical index doesn't. A name that happens to
-// be declared multiple times (e.g. a prototype and its out-of-line body)
-// is only returned once.
-func (ix *Index) CompleteSymbols(prefix string) []Symbol {
+// CompleteSymbols returns the first limit distinct declared names starting
+// with prefix, in name order, across the whole index -- for general
+// identifier completion (types, functions, tasks, classes, packages, enum
+// members, ...). It's deliberately not scope-restricted the way
+// FindDefinition is: every matching name anywhere in the workspace is a
+// candidate, since narrowing that down correctly would need the same
+// reachability information a real elaborator has and this lexical index
+// doesn't. A name that happens to be declared multiple times (e.g. a
+// prototype and its out-of-line body) is only returned once.
+//
+// truncated reports that at least one further match existed beyond limit,
+// so the caller can mark its response incomplete. A limit <= 0 means no cap
+// (truncated is then always false). Selecting the limit best rather than
+// sorting everything and slicing keeps a short prefix in a large workspace
+// from allocating the whole symbol table per keystroke -- see topK.
+func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, truncated bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 
-	var out []Symbol
+	top := newTopK(limit, func(a, b Symbol) bool { return a.Name < b.Name })
 	for name, refs := range ix.byName {
 		if prefix != "" && !strings.HasPrefix(name, prefix) {
 			continue
@@ -952,10 +952,9 @@ func (ix *Index) CompleteSymbols(prefix string) []Symbol {
 			continue
 		}
 		d := ix.byURI[refs[0].uri][refs[0].idx]
-		out = append(out, Symbol{Name: name, Kind: d.Kind})
+		top.push(Symbol{Name: name, Kind: d.Kind})
 	}
-	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
-	return out
+	return top.sorted()
 }
 
 // childRefsLocked returns every declRef in uri's bucket that's a direct
@@ -1172,35 +1171,50 @@ func IsContainer(kind Kind) bool {
 	return containerKinds[kind]
 }
 
-// WorkspaceSymbols returns every declaration whose name contains query
-// (case-insensitive substring match -- deliberately more permissive than
-// CompleteSymbols' prefix match, since this backs an explicit "jump to
-// symbol" search box rather than as-you-type completion, and a picker
-// user typing "axi" expects to find AXI_master), across the whole
-// workspace. Unlike CompleteSymbols, every declaration site is returned,
-// not deduplicated by name.
-func (ix *Index) WorkspaceSymbols(query string) []SymbolLocation {
+// WorkspaceSymbols returns the first limit declarations whose name contains
+// query (case-insensitive substring match -- deliberately more permissive
+// than CompleteSymbols' prefix match, since this backs an explicit "jump to
+// symbol" search box rather than as-you-type completion, and a picker user
+// typing "axi" expects to find AXI_master), across the whole workspace.
+// Unlike CompleteSymbols, every declaration site is returned, not
+// deduplicated by name.
+//
+// truncated, and a limit <= 0 meaning no cap, work exactly as in
+// CompleteSymbols -- and matter more here, since clients routinely fire an
+// empty query the moment the picker opens, which matches every declaration
+// in the workspace.
+//
+// Results order by name, then URI, then position. The trailing position
+// tiebreak isn't cosmetic: without it, declarations sharing a name and file
+// order by map iteration, so which of them survives the cut differs between
+// otherwise identical requests.
+func (ix *Index) WorkspaceSymbols(query string, limit int) (syms []SymbolLocation, truncated bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 
 	query = strings.ToLower(query)
-	var out []SymbolLocation
+	top := newTopK(limit, func(a, b SymbolLocation) bool {
+		switch {
+		case a.Name != b.Name:
+			return a.Name < b.Name
+		case a.URI != b.URI:
+			return a.URI < b.URI
+		case a.Line != b.Line:
+			return a.Line < b.Line
+		default:
+			return a.Character < b.Character
+		}
+	})
 	for name, refs := range ix.byName {
 		if query != "" && !strings.Contains(strings.ToLower(name), query) {
 			continue
 		}
 		for _, r := range refs {
 			d := ix.byURI[r.uri][r.idx]
-			out = append(out, SymbolLocation{Name: name, Kind: d.Kind, URI: r.uri, Line: d.Line, Character: d.Character})
+			top.push(SymbolLocation{Name: name, Kind: d.Kind, URI: r.uri, Line: d.Line, Character: d.Character})
 		}
 	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Name != out[j].Name {
-			return out[i].Name < out[j].Name
-		}
-		return out[i].URI < out[j].URI
-	})
-	return out
+	return top.sorted()
 }
 
 // FindOccurrences lexes text and returns every identifier-like token equal

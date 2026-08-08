@@ -95,19 +95,23 @@ func (s *Server) TextDocumentFoldingRange(context *glsp.Context, params *protoco
 // maxWorkspaceSymbols bounds a workspace/symbol response the same way
 // maxSymbolCompletions bounds completion: some clients send an empty
 // query the moment the picker opens, which would otherwise return every
-// declaration in a large workspace. Results are sorted by name before
+// declaration in a large workspace. Results are ordered by name before
 // the cut, so what survives is deterministic and the user narrows the
-// query to reach anything cut off.
+// query to reach anything cut off. The cut happens inside the index (see
+// sv.Index.WorkspaceSymbols) rather than here, so the discarded remainder
+// is never built in the first place.
 const maxWorkspaceSymbols = 500
 
 // WorkspaceSymbol backs "go to symbol in workspace" -- a case-insensitive
 // substring search (see sv.Index.WorkspaceSymbols) across every declared
 // name in every indexed file, not just the open ones.
+//
+// A truncated result is returned as-is: unlike completion, LSP 3.16's
+// workspace/symbol response has no "incomplete" flag to set (it's a bare
+// SymbolInformation array), so narrowing the query is the only way to reach
+// what was cut.
 func (s *Server) WorkspaceSymbol(context *glsp.Context, params *protocol.WorkspaceSymbolParams) ([]protocol.SymbolInformation, error) {
-	results := s.index.WorkspaceSymbols(params.Query)
-	if len(results) > maxWorkspaceSymbols {
-		results = results[:maxWorkspaceSymbols]
-	}
+	results, _ := s.index.WorkspaceSymbols(params.Query, maxWorkspaceSymbols)
 	out := make([]protocol.SymbolInformation, 0, len(results))
 	for _, r := range results {
 		out = append(out, protocol.SymbolInformation{
