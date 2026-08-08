@@ -237,12 +237,13 @@ func (s *Server) resolveWordAt(
 		return nil, nil
 	}
 
-	if moduleName, ok := sv.InstantiationPortNameAt(text, line, word, start); ok {
+	toks := sv.Lex(text) // lexed once, shared by both probes below -- see sv.Tokens
+	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		if locs, ok := s.index.FindInstantiationPort(moduleName, word); ok {
 			return formatLocations(locs, word), nil
 		}
 	}
-	if moduleName, ok := sv.InstantiationParamNameAt(text, line, word, start); ok {
+	if moduleName, ok := sv.InstantiationParamNameIn(toks, line, word, start); ok {
 		if locs, ok := s.index.FindInstantiationPort(moduleName, word); ok {
 			return formatLocations(locs, word), nil
 		}
@@ -319,7 +320,8 @@ func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.
 	}
 	line, character := int(params.Position.Line), int(params.Position.Character)
 
-	if moduleName, connected, ok := sv.InstantiationContextAt(text, line, character); ok {
+	toks := sv.Lex(text) // lexed once, shared by both context probes below -- see sv.Tokens
+	if moduleName, connected, ok := sv.InstantiationContextIn(toks, line, character); ok {
 		var items []protocol.CompletionItem
 		if ports, ok := s.index.Ports(moduleName); ok {
 			items = s.portCompletionItems(text, line, character, ports, connected, true)
@@ -327,7 +329,7 @@ func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.
 		return completionResult(items, false), nil
 	}
 
-	if moduleName, connected, ok := sv.InstantiationParamContextAt(text, line, character); ok {
+	if moduleName, connected, ok := sv.InstantiationParamContextIn(toks, line, character); ok {
 		var items []protocol.CompletionItem
 		if params, ok := s.index.Params(moduleName); ok {
 			items = s.portCompletionItems(text, line, character, params, connected, true)

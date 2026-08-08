@@ -150,3 +150,55 @@ func TestSymbolKindForNewDeclarationKinds(t *testing.T) {
 		}
 	}
 }
+
+// wideModuleDecls builds one module containing n leaf ports -- the shape a
+// real chip-scale module has, and the one the tree build used to be
+// quadratic in.
+func wideModuleDecls(n int) []sv.Declaration {
+	decls := make([]sv.Declaration, 0, n+1)
+	decls = append(decls, sv.Declaration{
+		Kind: sv.KindModule, Name: "wide", Line: 0, Character: 7,
+		EndLine: n + 1, EndCharacter: 0, Parent: -1,
+	})
+	for i := range n {
+		decls = append(decls, sv.Declaration{
+			Kind: sv.KindPort, Name: fmt.Sprintf("sig_%04d", i),
+			Line: i + 1, Character: 2, EndLine: i + 1, EndCharacter: 10, Parent: 0,
+		})
+	}
+	return decls
+}
+
+func TestDocumentSymbolTreeWideModule(t *testing.T) {
+	decls := wideModuleDecls(500)
+	tree := documentSymbolTree(decls, childIndex(decls), -1)
+	if len(tree) != 1 {
+		t.Fatalf("expected 1 root symbol, got %d", len(tree))
+	}
+	if got := len(tree[0].Children); got != 500 {
+		t.Fatalf("expected 500 children, got %d", got)
+	}
+	if tree[0].Children[0].Name != "sig_0000" || tree[0].Children[499].Name != "sig_0499" {
+		t.Fatalf("children out of order: first=%q last=%q", tree[0].Children[0].Name, tree[0].Children[499].Name)
+	}
+	if tree[0].Children[0].Children != nil {
+		t.Fatalf("a leaf port should have no children, got %+v", tree[0].Children[0].Children)
+	}
+}
+
+// A Parent index pointing at itself would make the recursion never
+// terminate; childIndex drops it rather than trusting the bucket.
+func TestDocumentSymbolTreeIgnoresSelfParent(t *testing.T) {
+	decls := []sv.Declaration{{Kind: sv.KindModule, Name: "loop", Parent: 0}}
+	if tree := documentSymbolTree(decls, childIndex(decls), -1); len(tree) != 0 {
+		t.Fatalf("expected no roots for a self-parented decl, got %+v", tree)
+	}
+}
+
+func BenchmarkDocumentSymbolTreeWideModule(b *testing.B) {
+	decls := wideModuleDecls(2000)
+	b.ResetTimer()
+	for range b.N {
+		documentSymbolTree(decls, childIndex(decls), -1)
+	}
+}

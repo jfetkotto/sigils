@@ -29,7 +29,33 @@ import (
 // connection earlier in the same (still-open) parens, so the caller can
 // exclude them from suggestions.
 func InstantiationContextAt(text string, line, character int) (moduleName string, connected map[string]bool, ok bool) {
-	return instantiationContextAt(text, line, character, instantiationModuleTokenBefore)
+	return InstantiationContextIn(Lex(text), line, character)
+}
+
+// Tokens is a whole document already lexed, so a caller that makes several
+// instantiation-context probes against the same text pays for lexing once
+// rather than once per probe. Every "...At(text, ...)" function in this
+// file is a thin wrapper that lexes and delegates to its "...In(toks, ...)"
+// counterpart -- convenient for a single probe or a test, but a request
+// handler that probes for both a port connection and a parameter override
+// (as goto-definition, hover, and find-references all do) should Lex once
+// and use the "In" form. Lexing is a whole-file operation, so on a large
+// file the difference is per-keystroke visible.
+type Tokens []svtoken.Token
+
+// Lex tokenizes text for the "...In" functions below. Lex errors are
+// ignored deliberately: these are lexical heuristics run against text the
+// user is still typing, and a partial token stream is exactly what they
+// need to work on.
+func Lex(text string) Tokens {
+	toks, _ := lexer.Lex(text)
+	return toks
+}
+
+// InstantiationContextIn is InstantiationContextAt against an
+// already-lexed document -- see Tokens.
+func InstantiationContextIn(toks Tokens, line, character int) (moduleName string, connected map[string]bool, ok bool) {
+	return instantiationContextAt(toks, line, character, instantiationModuleTokenBefore)
 }
 
 // InstantiationParamContextAt is InstantiationContextAt's counterpart for
@@ -39,7 +65,13 @@ func InstantiationContextAt(text string, line, character int) (moduleName string
 // semantics as InstantiationContextAt; see
 // instantiationModuleTokenBeforeParamList for the one part that differs.
 func InstantiationParamContextAt(text string, line, character int) (moduleName string, connected map[string]bool, ok bool) {
-	return instantiationContextAt(text, line, character, instantiationModuleTokenBeforeParamList)
+	return InstantiationParamContextIn(Lex(text), line, character)
+}
+
+// InstantiationParamContextIn is InstantiationParamContextAt against an
+// already-lexed document -- see Tokens.
+func InstantiationParamContextIn(toks Tokens, line, character int) (moduleName string, connected map[string]bool, ok bool) {
+	return instantiationContextAt(toks, line, character, instantiationModuleTokenBeforeParamList)
 }
 
 // instantiationContextAt is InstantiationContextAt/InstantiationParamContextAt's
@@ -51,11 +83,9 @@ func InstantiationParamContextAt(text string, line, character int) (moduleName s
 // "(" belongs to some unrelated construct), a safe failure mode since
 // the caller just gets no completions/no resolution.
 func instantiationContextAt(
-	text string, line, character int,
+	toks Tokens, line, character int,
 	findModule func(prefix []svtoken.Token, openIdx int) (svtoken.Token, bool),
 ) (moduleName string, connected map[string]bool, ok bool) {
-	toks, _ := lexer.Lex(text)
-
 	cutoff := 0
 	for cutoff < len(toks) && before(toks[cutoff].Line, toks[cutoff].Character, line, character) {
 		cutoff++
@@ -196,7 +226,13 @@ func skipBalancedBack(toks []svtoken.Token, idx int, open, close svtoken.Kind) (
 // token is always included regardless of exactly where the cursor
 // landed within it.
 func InstantiationPortNameAt(text string, line int, word string, wordStart int) (moduleName string, ok bool) {
-	moduleName, connected, ok := InstantiationContextAt(text, line, wordStart+UTF16Len(word))
+	return InstantiationPortNameIn(Lex(text), line, word, wordStart)
+}
+
+// InstantiationPortNameIn is InstantiationPortNameAt against an
+// already-lexed document -- see Tokens.
+func InstantiationPortNameIn(toks Tokens, line int, word string, wordStart int) (moduleName string, ok bool) {
+	moduleName, connected, ok := InstantiationContextIn(toks, line, wordStart+UTF16Len(word))
 	if !ok || !connected[word] {
 		return "", false
 	}
@@ -207,7 +243,13 @@ func InstantiationPortNameAt(text string, line int, word string, wordStart int) 
 // its doc comment for the wordStart/word-end reasoning), for a parameter
 // override's name ("#( .WIDTH(8) )") instead of a port connection's.
 func InstantiationParamNameAt(text string, line int, word string, wordStart int) (moduleName string, ok bool) {
-	moduleName, connected, ok := InstantiationParamContextAt(text, line, wordStart+UTF16Len(word))
+	return InstantiationParamNameIn(Lex(text), line, word, wordStart)
+}
+
+// InstantiationParamNameIn is InstantiationParamNameAt against an
+// already-lexed document -- see Tokens.
+func InstantiationParamNameIn(toks Tokens, line int, word string, wordStart int) (moduleName string, ok bool) {
+	moduleName, connected, ok := InstantiationParamContextIn(toks, line, wordStart+UTF16Len(word))
 	if !ok || !connected[word] {
 		return "", false
 	}
