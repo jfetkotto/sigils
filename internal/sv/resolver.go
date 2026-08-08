@@ -5,7 +5,7 @@ import "github.com/jfetkotto/svparse/preprocessor"
 // IncludeResolver resolves `include paths the same way
 // preprocessor.IncludeResolver does, but also reports which paths it
 // successfully resolved during one Scan call, so Index can track
-// cross-file dependencies (see Index.recordDependencies/Dependents). A
+// cross-file dependencies (see Index.SetFile/Dependents). A
 // concrete implementation lives outside this package (internal/lspserver),
 // since resolving a path needs filesystem access and workspace-specific
 // `+incdir+` configuration this package deliberately doesn't have -- this

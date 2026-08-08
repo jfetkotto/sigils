@@ -467,13 +467,9 @@ func (s *Server) symbolCompletionItems(text string, line, character int) ([]prot
 		return nil, false
 	}
 
-	symbols := s.index.CompleteSymbols(prefix)
+	symbols, truncated := s.index.CompleteSymbols(prefix, maxSymbolCompletions)
 	if len(symbols) == 0 {
 		return nil, false
-	}
-	truncated := len(symbols) > maxSymbolCompletions
-	if truncated {
-		symbols = symbols[:maxSymbolCompletions]
 	}
 
 	editRange := completionRange(line, prefixStart, character)

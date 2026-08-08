@@ -1,6 +1,10 @@
 package sv
 
-import "testing"
+import (
+	"fmt"
+	"strings"
+	"testing"
+)
 
 func TestIndexLookup(t *testing.T) {
 	ix := NewIndex()
@@ -580,7 +584,7 @@ endclass
 typedef enum {IDLE, RUNNING} state_t;
 `)
 
-	got := ix.CompleteSymbols("le")
+	got := mustCompleteSymbols(ix, "le")
 	if len(got) != 2 || got[0].Name != "leaf" || got[1].Name != "leaf_driver" {
 		t.Fatalf("CompleteSymbols(le) = %+v, want [leaf leaf_driver] (sorted)", got)
 	}
@@ -592,7 +596,7 @@ typedef enum {IDLE, RUNNING} state_t;
 func TestCompleteSymbolsEmptyPrefixReturnsEverything(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module a;\nendmodule\nmodule b;\nendmodule\n")
-	if got := ix.CompleteSymbols(""); len(got) != 2 {
+	if got := mustCompleteSymbols(ix, ""); len(got) != 2 {
 		t.Fatalf("CompleteSymbols(\"\") = %+v, want 2 symbols", got)
 	}
 }
@@ -600,7 +604,7 @@ func TestCompleteSymbolsEmptyPrefixReturnsEverything(t *testing.T) {
 func TestCompleteSymbolsNoMatch(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module leaf;\nendmodule\n")
-	if got := ix.CompleteSymbols("zzz"); len(got) != 0 {
+	if got := mustCompleteSymbols(ix, "zzz"); len(got) != 0 {
 		t.Fatalf("CompleteSymbols(zzz) = %+v, want none", got)
 	}
 }
@@ -613,7 +617,7 @@ endclass
 function foo::bar();
 endfunction
 `)
-	got := ix.CompleteSymbols("bar")
+	got := mustCompleteSymbols(ix, "bar")
 	if len(got) != 1 || got[0].Name != "bar" {
 		t.Fatalf("CompleteSymbols(bar) = %+v, want exactly one \"bar\" despite the prototype+body", got)
 	}
@@ -622,7 +626,7 @@ endfunction
 func TestCompleteSymbolsIncludesEnumMembers(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "typedef enum {IDLE, RUNNING} state_t;\n")
-	got := ix.CompleteSymbols("RUN")
+	got := mustCompleteSymbols(ix, "RUN")
 	if len(got) != 1 || got[0].Name != "RUNNING" || got[0].Kind != KindEnumMember {
 		t.Fatalf("CompleteSymbols(RUN) = %+v, want [RUNNING (enum_member)]", got)
 	}
@@ -669,7 +673,7 @@ func TestWorkspaceSymbolsSubstringMatch(t *testing.T) {
 	ix.SetFile("file:///a.sv", "module leaf_driver;\nendmodule\n")
 	ix.SetFile("file:///b.sv", "class other;\nendclass\n")
 
-	got := ix.WorkspaceSymbols("driver")
+	got := mustWorkspaceSymbols(ix, "driver")
 	if len(got) != 1 || got[0].Name != "leaf_driver" || got[0].URI != "file:///a.sv" {
 		t.Fatalf("WorkspaceSymbols(driver) = %+v", got)
 	}
@@ -680,7 +684,7 @@ func TestWorkspaceSymbolsReturnsEveryDeclarationSite(t *testing.T) {
 	ix.SetFile("file:///a.sv", "module dup;\nendmodule\n")
 	ix.SetFile("file:///b.sv", "module dup;\nendmodule\n")
 
-	got := ix.WorkspaceSymbols("dup")
+	got := mustWorkspaceSymbols(ix, "dup")
 	if len(got) != 2 {
 		t.Fatalf("WorkspaceSymbols(dup) = %+v, want 2 (not deduplicated, unlike CompleteSymbols)", got)
 	}
@@ -690,10 +694,10 @@ func TestWorkspaceSymbolsCaseInsensitive(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module AXI_master;\nendmodule\n")
 
-	if got := ix.WorkspaceSymbols("axi"); len(got) != 1 || got[0].Name != "AXI_master" {
+	if got := mustWorkspaceSymbols(ix, "axi"); len(got) != 1 || got[0].Name != "AXI_master" {
 		t.Fatalf("WorkspaceSymbols(axi) = %+v, want AXI_master", got)
 	}
-	if got := ix.WorkspaceSymbols("MASTER"); len(got) != 1 {
+	if got := mustWorkspaceSymbols(ix, "MASTER"); len(got) != 1 {
 		t.Fatalf("WorkspaceSymbols(MASTER) = %+v, want AXI_master", got)
 	}
 }
@@ -701,7 +705,7 @@ func TestWorkspaceSymbolsCaseInsensitive(t *testing.T) {
 func TestWorkspaceSymbolsEmptyQueryReturnsEverything(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module a;\nendmodule\nmodule b;\nendmodule\n")
-	if got := ix.WorkspaceSymbols(""); len(got) != 2 {
+	if got := mustWorkspaceSymbols(ix, ""); len(got) != 2 {
 		t.Fatalf("WorkspaceSymbols(\"\") = %+v, want 2", got)
 	}
 }
@@ -1350,5 +1354,116 @@ func TestSetFileReturnsTouchedURIsAcrossIncludeWithDeclarationsAndErrors(t *test
 		if !want[uri] {
 			t.Fatalf("unexpected URI %s in touchedURIs", uri)
 		}
+	}
+}
+
+// mustCompleteSymbols/mustWorkspaceSymbols call the uncapped form (limit 0)
+// and drop the truncated flag, which is always false there -- the shape
+// these tests were written against, before the cap moved into the index.
+// Tests that care about capping pass a real limit and check the flag; see
+// TestCompleteSymbolsRespectsLimit.
+func mustCompleteSymbols(ix *Index, prefix string) []Symbol {
+	syms, _ := ix.CompleteSymbols(prefix, 0)
+	return syms
+}
+
+func mustWorkspaceSymbols(ix *Index, query string) []SymbolLocation {
+	syms, _ := ix.WorkspaceSymbols(query, 0)
+	return syms
+}
+
+// recordDependencies replaces uri's dependency set directly, bypassing a
+// real Scan. It lives here rather than in index.go because nothing in
+// production ever calls it -- SetFile records dependencies inline via
+// recordDependenciesLocked -- and these tests want to exercise Dependents/
+// IncludesOf against a hand-built graph without standing up an
+// IncludeResolver and matching source files for every case.
+func (ix *Index) recordDependencies(uri string, deps []string) {
+	ix.mu.Lock()
+	defer ix.mu.Unlock()
+	ix.recordDependenciesLocked(uri, deps)
+}
+
+// buildWideIndex indexes n modules named mod_%05d in one file, the shape a
+// large workspace presents to an unfiltered symbol query.
+func buildWideIndex(n int) *Index {
+	ix := NewIndex()
+	var b strings.Builder
+	for i := range n {
+		fmt.Fprintf(&b, "module mod_%05d;\nendmodule\n", i)
+	}
+	ix.SetFile("file:///wide.sv", b.String())
+	return ix
+}
+
+func TestCompleteSymbolsRespectsLimit(t *testing.T) {
+	ix := buildWideIndex(50)
+
+	syms, truncated := ix.CompleteSymbols("mod_", 10)
+	if len(syms) != 10 {
+		t.Fatalf("got %d symbols, want 10", len(syms))
+	}
+	if !truncated {
+		t.Errorf("truncated = false, want true (50 matches, limit 10)")
+	}
+	// The cap must keep the FIRST ten by name, not an arbitrary ten.
+	for i, sym := range syms {
+		if want := fmt.Sprintf("mod_%05d", i); sym.Name != want {
+			t.Fatalf("syms[%d] = %q, want %q", i, sym.Name, want)
+		}
+	}
+
+	all, truncated := ix.CompleteSymbols("mod_", 100)
+	if len(all) != 50 || truncated {
+		t.Errorf("limit above the match count: got %d symbols, truncated=%v; want 50, false", len(all), truncated)
+	}
+}
+
+func TestWorkspaceSymbolsRespectsLimit(t *testing.T) {
+	ix := buildWideIndex(50)
+
+	syms, truncated := ix.WorkspaceSymbols("mod_", 10)
+	if len(syms) != 10 || !truncated {
+		t.Fatalf("got %d symbols, truncated=%v; want 10, true", len(syms), truncated)
+	}
+	for i, sym := range syms {
+		if want := fmt.Sprintf("mod_%05d", i); sym.Name != want {
+			t.Fatalf("syms[%d] = %q, want %q", i, sym.Name, want)
+		}
+	}
+}
+
+// The truncation point must not move between identical requests: the index
+// iterates maps, so anything the ordering doesn't fully determine leaks that
+// nondeterminism into which results survive the cut.
+func TestWorkspaceSymbolsCutIsDeterministic(t *testing.T) {
+	ix := NewIndex()
+	// Same name, same file, several declaration sites -- the case that
+	// ordering by (name, uri) alone leaves unresolved.
+	ix.SetFile("file:///dup.sv", "module dup;\nendmodule\nmodule dup;\nendmodule\nmodule dup;\nendmodule\n")
+
+	first, _ := ix.WorkspaceSymbols("dup", 2)
+	for range 50 {
+		got, _ := ix.WorkspaceSymbols("dup", 2)
+		if len(got) != len(first) {
+			t.Fatalf("result length varied: %d vs %d", len(got), len(first))
+		}
+		for i := range got {
+			if got[i] != first[i] {
+				t.Fatalf("result varied between identical calls: %+v vs %+v", got[i], first[i])
+			}
+		}
+	}
+}
+
+// An empty query matches every declaration in the workspace, which is what
+// a symbol picker sends the moment it opens. Memory here should track the
+// limit, not the workspace: building all 50k matches to return 500 of them
+// cost ~17MB and 3x the time before the cut moved into the index.
+func BenchmarkWorkspaceSymbolsEmptyQuery(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.WorkspaceSymbols("", 500)
 	}
 }
