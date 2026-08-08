@@ -4,7 +4,23 @@ import (
 	"testing"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
+
+	"github.com/jfetkotto/sigils/internal/sv"
 )
+
+// scopedOccurrencesAt is the convenience the production scopedOccurrences
+// deliberately no longer offers: it looks uri's text up and lexes it before
+// delegating. Every real handler already holds both, which is exactly why
+// scopedOccurrences takes them as parameters instead of re-deriving them
+// (see its doc comment); only tests need this step spelled out.
+func scopedOccurrencesAt(t *testing.T, s *Server, uri string, line, character, start int, word, qualifier string, hasQualifier bool) []protocol.Location {
+	t.Helper()
+	text, ok := s.textForURI(uri)
+	if !ok {
+		t.Fatalf("no text available for %s", uri)
+	}
+	return s.scopedOccurrences(sv.Lex(text), uri, line, character, start, word, qualifier, hasQualifier)
+}
 
 func TestScopedOccurrencesSameFile(t *testing.T) {
 	s := newTestServer()
@@ -20,7 +36,7 @@ func TestScopedOccurrencesSameFile(t *testing.T) {
 
 	// "leaf" on line 1 -- a module name, so this stays workspace-wide, but
 	// there's only one file open so the result set is the same either way.
-	locs := s.scopedOccurrences(uri, 1, 3, 2, "leaf", "", false)
+	locs := scopedOccurrencesAt(t, s, uri, 1, 3, 2, "leaf", "", false)
 	if len(locs) != 2 {
 		t.Fatalf("scopedOccurrences(leaf) = %+v, want 2", locs)
 	}
@@ -48,7 +64,7 @@ func TestScopedOccurrencesAggregatesAcrossFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	locs := s.scopedOccurrences("file:///top.sv", 1, 3, 2, "leaf", "", false)
+	locs := scopedOccurrencesAt(t, s, "file:///top.sv", 1, 3, 2, "leaf", "", false)
 	if len(locs) != 2 {
 		t.Fatalf("scopedOccurrences(leaf) = %+v, want 2 (one per file)", locs)
 	}
@@ -82,7 +98,7 @@ func TestScopedOccurrencesRestrictsModuleInternalHelper(t *testing.T) {
 
 	// "helper" call inside mod_a (line 3) must not pull in mod_b's
 	// unrelated same-named helper.
-	locs := s.scopedOccurrences("file:///a.sv", 3, 12, 10, "helper", "", false)
+	locs := scopedOccurrencesAt(t, s, "file:///a.sv", 3, 12, 10, "helper", "", false)
 	if len(locs) != 2 {
 		t.Fatalf("expected 2 occurrences within mod_a only, got %+v", locs)
 	}

@@ -35,14 +35,15 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 		return nil, nil
 	}
 
-	if moduleName, ok := sv.InstantiationPortNameAt(text, line, word, start); ok {
+	toks := sv.Lex(text) // lexed once, shared by both probes below -- see sv.Tokens
+	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
 			return &protocol.Hover{
 				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
 			}, nil
 		}
 	}
-	if moduleName, ok := sv.InstantiationParamNameAt(text, line, word, start); ok {
+	if moduleName, ok := sv.InstantiationParamNameIn(toks, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
 			return &protocol.Hover{
 				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
@@ -319,7 +320,7 @@ func (s *Server) TextDocumentDocumentHighlight(context *glsp.Context, params *pr
 	}
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
-	locs := s.scopedOccurrences(params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
+	locs := s.scopedOccurrences(sv.Lex(text), params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
 	out := make([]protocol.DocumentHighlight, 0, len(locs))
 	for _, loc := range locs {
 		if loc.URI != params.TextDocument.URI {

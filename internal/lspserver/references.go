@@ -29,7 +29,7 @@ func (s *Server) TextDocumentReferences(context *glsp.Context, params *protocol.
 	}
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
-	locs := s.scopedOccurrences(params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
+	locs := s.scopedOccurrences(sv.Lex(text), params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
 	if params.Context.IncludeDeclaration {
 		return locs, nil
 	}
@@ -100,7 +100,7 @@ func (s *Server) TextDocumentRename(context *glsp.Context, params *protocol.Rena
 	}
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
-	locs := s.scopedOccurrences(params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
+	locs := s.scopedOccurrences(sv.Lex(text), params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
 	if len(locs) == 0 {
 		return nil, nil
 	}

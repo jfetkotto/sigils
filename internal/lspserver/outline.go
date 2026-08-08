@@ -12,26 +12,63 @@ import (
 // all), with no extra scanning.
 func (s *Server) TextDocumentDocumentSymbol(context *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
-	tree := documentSymbolTree(decls, -1)
+	tree := documentSymbolTree(decls, childIndex(decls), -1)
 	if len(tree) == 0 {
 		return nil, nil
 	}
 	return tree, nil
 }
 
-func documentSymbolTree(decls []sv.Declaration, parent int) []protocol.DocumentSymbol {
-	var out []protocol.DocumentSymbol
+// childIndex buckets decls by Parent once, so documentSymbolTree can find a
+// declaration's children by lookup instead of rescanning the whole slice.
+// children[i] holds the indices parented to i; roots (Parent == -1) come
+// back separately, since there's no bucket to hold them.
+//
+// Without this the tree build is quadratic: it rescanned every declaration
+// in the file once per declaration, including the ports, variables and
+// parameters that make up the bulk of a real module and never have children
+// at all. Editors request documentSymbol on open and again on change, so a
+// wide module (a few thousand signals) paid millions of iterations per
+// keystroke to produce the same tree.
+func childIndex(decls []sv.Declaration) (children [][]int) {
+	children = make([][]int, len(decls))
 	for i, d := range decls {
-		if d.Parent != parent {
-			continue
+		// A Parent index out of range, or one that doesn't point strictly
+		// backwards, would mean a malformed bucket; ignoring it here keeps a
+		// bad index from panicking or building a cycle the recursion below
+		// would never escape.
+		if d.Parent >= 0 && d.Parent < len(decls) && d.Parent != i {
+			children[d.Parent] = append(children[d.Parent], i)
 		}
+	}
+	return children
+}
+
+func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []protocol.DocumentSymbol {
+	var idxs []int
+	if parent == -1 {
+		for i, d := range decls {
+			if d.Parent == -1 {
+				idxs = append(idxs, i)
+			}
+		}
+	} else {
+		idxs = children[parent]
+	}
+
+	out := make([]protocol.DocumentSymbol, 0, len(idxs))
+	for _, i := range idxs {
+		d := decls[i]
 		out = append(out, protocol.DocumentSymbol{
 			Name:           d.Name,
 			Kind:           symbolKindFor(d.Kind),
 			Range:          protocol.Range{Start: position(d.Line, d.Character), End: position(d.EndLine, d.EndCharacter)},
 			SelectionRange: nameRange(d.Line, d.Character, d.Name),
-			Children:       documentSymbolTree(decls, i),
+			Children:       documentSymbolTree(decls, children, i),
 		})
+	}
+	if len(out) == 0 {
+		return nil
 	}
 	return out
 }

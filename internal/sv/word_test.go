@@ -1,6 +1,9 @@
 package sv
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestWordAtMiddleOfWord(t *testing.T) {
 	word, start, ok := WordAt("  top u_top (a, b);", 0, 4)
@@ -171,5 +174,50 @@ func TestLineSliceOutOfRangeLine(t *testing.T) {
 func TestLineSliceClampsEnd(t *testing.T) {
 	if got := LineSlice("leaf", 0, 0, 100); got != "leaf" {
 		t.Fatalf("LineSlice = %q, want \"leaf\"", got)
+	}
+}
+
+// lineAt is reached only through the exported helpers, so its boundary
+// behaviour is pinned through WordAt: which line indices exist for a given
+// text is exactly what strings.Split used to decide, and the hand-rolled
+// scan that replaced it must agree -- notably that a trailing newline
+// yields one more (empty) line, and that an out-of-range line is not found.
+func TestWordAtLineBoundaries(t *testing.T) {
+	cases := []struct {
+		name     string
+		text     string
+		line     int
+		wantWord string
+		wantOK   bool
+	}{
+		{"only line, no trailing newline", "alpha", 0, "alpha", true},
+		{"past the only line", "alpha", 1, "", false},
+		{"empty line after trailing newline", "alpha\n", 1, "", false},
+		{"past the empty trailing line", "alpha\n", 2, "", false},
+		{"empty text", "", 0, "", false},
+		{"second of two", "alpha\nbeta", 1, "beta", true},
+		{"blank line between", "alpha\n\nbeta", 2, "beta", true},
+		{"crlf line endings", "alpha\r\nbeta\r\n", 1, "beta", true},
+		{"negative line", "alpha", -1, "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			word, _, ok := WordAt(tc.text, tc.line, 0)
+			if ok != tc.wantOK || word != tc.wantWord {
+				t.Errorf("WordAt(%q, %d, 0) = (%q, %v), want (%q, %v)", tc.text, tc.line, word, ok, tc.wantWord, tc.wantOK)
+			}
+		})
+	}
+}
+
+func BenchmarkWordAtLateLine(b *testing.B) {
+	var sb strings.Builder
+	for range 5000 {
+		sb.WriteString("  logic [31:0] some_signal_name;\n")
+	}
+	text := sb.String()
+	b.ResetTimer()
+	for range b.N {
+		WordAt(text, 4999, 17)
 	}
 }

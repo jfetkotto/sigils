@@ -134,10 +134,31 @@ func LineSlice(text string, line, start, end int) string {
 	return string(lineText[rs:re])
 }
 
+// lineAt returns line's text (zero-based) as runes, with any trailing '\r'
+// stripped, or ok=false if line is out of range.
+//
+// Deliberately not strings.Split: every exported function in this file
+// calls this, and a single completion request makes about five such calls
+// (CompletionEditRange twice, WordAt, QualifierAt, LineSlice). Splitting
+// allocates a slice covering the whole document each time, so on a large
+// file that was five full-document allocations per keystroke to read one
+// line. Scanning to the line's own bounds and converting only that slice
+// keeps the cost proportional to the line, not the file.
 func lineAt(text string, line int) ([]rune, bool) {
-	lines := strings.Split(text, "\n")
-	if line < 0 || line >= len(lines) {
+	if line < 0 {
 		return nil, false
 	}
-	return []rune(strings.TrimRight(lines[line], "\r")), true
+	start := 0
+	for range line {
+		nl := strings.IndexByte(text[start:], '\n')
+		if nl < 0 {
+			return nil, false // fewer than line+1 lines
+		}
+		start += nl + 1
+	}
+	end := len(text)
+	if nl := strings.IndexByte(text[start:], '\n'); nl >= 0 {
+		end = start + nl
+	}
+	return []rune(strings.TrimRight(text[start:end], "\r")), true
 }
