@@ -624,12 +624,13 @@ func (ix *Index) preferGloballyLocked(word string, locs []Location, wantPrototyp
 //     enclosing scope, not a name some other file made visible.
 //  5. Then every package this scope can see via an "import pkg::*;"/
 //     "import pkg::name;" statement (see importsByURI,
-//     lookupInImportsRefsLocked) is searched. An import is a first-class
-//     SV scoping construct with real lexical nesting, so it's checked
-//     before `include -- it composes with the same container-ancestor
-//     chain step 3 already walks, rather than the unscoped, file-wide
-//     visibility `include grants regardless of where the `include line
-//     itself sits.
+//     lookupInImportsRefsLocked) is searched -- those written in this
+//     file first, then those it picked up from an `include d header. An
+//     import is a first-class SV scoping construct with real lexical
+//     nesting, so it's checked before `include -- it composes with the
+//     same container-ancestor chain step 3 already walks, rather than the
+//     unscoped, file-wide visibility `include grants regardless of where
+//     the `include line itself sits.
 //  6. Still nothing? uri's own `include d files (see dependsOn) are
 //     searched next, unrestricted by Kind -- unlike the global fallback
 //     below, an `include is an explicit dependency the file itself
@@ -710,41 +711,101 @@ func (ix *Index) importVisibleAtLocked(uri string, imp importDecl, line, charact
 }
 
 // lookupInImportsRefsLocked resolves word via every import visible at
-// (uri, line, character) -- see importVisibleAtLocked. A specific
-// ("import pkg::name;") import only grants visibility to that one name; a
-// wildcard ("import pkg::*;") grants visibility to anything the package
-// declares. Restricted to Kind == KindPackage (SV import syntax, LRM
-// 26.3, is package-only, unlike a qualified Pkg::name/Class::name
-// reference which also allows a class) -- defensive against a workspace
-// where the imported identifier isn't actually a package, matching
-// lookupQualifiedRefsLocked's own Kind check. Multiple visible imports
-// whose package happens to declare the same word (e.g. two wildcard-
-// imported packages both defining "foo") are deliberately NOT
-// disambiguated -- every match is returned, the same "return every
-// plausible candidate" behavior lookupQualifiedRefsLocked already has when
-// a qualifier name is ambiguous across files. Picking one silently could
-// easily be wrong; this index has no elaborator to confirm which one a
-// real compile would actually bind.
+// (uri, line, character) -- see importVisibleAtLocked for which those
+// are, and importMemberRefsLocked for what one of them grants.
+//
+// Failing that, the imports uri picked up from the files it `include s
+// are tried (see includedImportRefsLocked). They rank second because an
+// import written in this file is the more specific statement of intent,
+// and because an included one is only visible file-wide by
+// approximation.
+//
+// Multiple visible imports whose package happens to declare the same word
+// (e.g. two wildcard-imported packages both defining "foo") are
+// deliberately NOT disambiguated -- every match is returned, the same
+// "return every plausible candidate" behavior lookupQualifiedRefsLocked
+// already has when a qualifier name is ambiguous across files. Picking
+// one silently could easily be wrong; this index has no elaborator to
+// confirm which one a real compile would actually bind.
 func (ix *Index) lookupInImportsRefsLocked(uri string, line, character int, word string) ([]declRef, bool) {
 	var out []declRef
 	for _, imp := range ix.importsByURI[uri] {
-		if imp.Member != "*" && imp.Member != word {
-			continue
-		}
 		if !ix.importVisibleAtLocked(uri, imp, line, character) {
 			continue
 		}
-		for _, qref := range ix.byName[imp.Package] {
-			if ix.byURI[qref.uri][qref.idx].Kind != KindPackage {
-				continue
-			}
-			out = append(out, ix.childRefsLocked(qref.uri, qref.idx, word)...)
-		}
+		out = append(out, ix.importMemberRefsLocked(imp, word)...)
+	}
+	if len(out) == 0 {
+		out = ix.includedImportRefsLocked(uri, word)
 	}
 	if len(out) == 0 {
 		return nil, false
 	}
 	return out, true
+}
+
+// importMemberRefsLocked resolves word through one import statement: a
+// specific ("import pkg::name;") import only grants visibility to that
+// one name, a wildcard ("import pkg::*;") to anything the package
+// declares. Restricted to Kind == KindPackage (SV import syntax, LRM
+// 26.3, is package-only, unlike a qualified Pkg::name/Class::name
+// reference which also allows a class) -- defensive against a workspace
+// where the imported identifier isn't actually a package, matching
+// lookupQualifiedRefsLocked's own Kind check. Deciding *whether* an
+// import applies at all is the caller's job; the three callers each scope
+// it differently (a position, a container, an `include).
+func (ix *Index) importMemberRefsLocked(imp importDecl, word string) []declRef {
+	if imp.Member != "*" && imp.Member != word {
+		return nil
+	}
+	var out []declRef
+	for _, qref := range ix.byName[imp.Package] {
+		if ix.byURI[qref.uri][qref.idx].Kind != KindPackage {
+			continue
+		}
+		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, word)...)
+	}
+	return out
+}
+
+// includedImportRefsLocked resolves word through the imports ownerURI
+// picked up from the files it `include s (direct or transitive --
+// dependsOn already holds the full set). After preprocessing an included
+// import is just an import statement sitting in the includer, so a shared
+// "project imports" header pulled into many modules grants them all the
+// visibility it names.
+//
+// Only the included file's *file-scope* imports carry over. One nested in
+// a container declared inside the header itself ("module m; import
+// p::*; endmodule" in a .svh) stays that container's, and references
+// inside it are in the header's own file, where the ordinary lookup
+// already finds it.
+//
+// The result is visible file-wide in ownerURI rather than scoped to
+// wherever the `include line sits: the index doesn't record include-site
+// positions at all, and this matches the unscoped visibility an `include
+// already grants for declarations reached through it (see
+// resolveRefsLocked step 6).
+func (ix *Index) includedImportRefsLocked(ownerURI, word string) []declRef {
+	deps := ix.dependsOn[ownerURI]
+	if len(deps) == 0 {
+		return nil
+	}
+	var out []declRef
+	for _, dep := range deps {
+		for _, imp := range ix.importsByURI[dep] {
+			if imp.Parent != -1 {
+				continue
+			}
+			// Two headers importing the same package resolve to one place.
+			for _, ref := range ix.importMemberRefsLocked(imp, word) {
+				if !slices.Contains(out, ref) {
+					out = append(out, ref)
+				}
+			}
+		}
+	}
+	return out
 }
 
 // lookupInIncludesRefsLocked searches uri's own `include d files (direct
@@ -1154,15 +1215,13 @@ func (ix *Index) containerImportRefsLocked(containerURI string, containerIdx int
 		if imp.Parent != containerIdx && imp.Parent != -1 {
 			continue
 		}
-		if imp.Member != "*" && imp.Member != word {
-			continue
-		}
-		for _, qref := range ix.byName[imp.Package] {
-			if ix.byURI[qref.uri][qref.idx].Kind != KindPackage {
-				continue
-			}
-			out = append(out, ix.childRefsLocked(qref.uri, qref.idx, word)...)
-		}
+		out = append(out, ix.importMemberRefsLocked(imp, word)...)
+	}
+	if len(out) == 0 {
+		// The import may itself have arrived through a *different*
+		// `include into the same container -- the two-header package
+		// shape, one header carrying the imports and another using them.
+		out = ix.includedImportRefsLocked(containerURI, word)
 	}
 	return out
 }

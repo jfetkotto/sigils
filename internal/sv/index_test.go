@@ -1602,6 +1602,145 @@ func TestFindDefinitionResolvesFileScopeTypedefFromInsideAModule(t *testing.T) {
 	}
 }
 
+// An import statement lands in the bucket of the file it's written in,
+// exactly like a declaration, so one written in a header used to be
+// invisible to the file that `include d it -- even though after
+// preprocessing it's just an import sitting in the includer.
+
+const commonPkgSrc = "package common_pkg;\n  typedef logic [7:0] t_common;\n  typedef logic t_other;\nendpackage\n"
+
+func TestImportInAnIncludedHeaderIsVisibleToTheIncluder(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top;\n  t_common c;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common) = %+v, %v", locs, ok)
+	}
+}
+
+func TestImportInAHeaderIncludedIntoAPackageIsVisibleInThatPackagesFile(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"imports.svh\"\n  typedef t_common t_alias;\nendpackage\n")
+
+	locs, ok := ix.FindDefinition("file:///pkg_cfg.sv", 2, 10, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common) = %+v, %v", locs, ok)
+	}
+}
+
+func TestImportFromOneHeaderIsVisibleInASiblingHeaderOfTheSamePackage(t *testing.T) {
+	// One header carries the package's imports, another uses them -- the
+	// reference and the import statement are in two different files, and
+	// neither is the file that opens the package.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"imports.svh": "import common_pkg::*;\n",
+			"defs.svh":    "  typedef t_common t_alias;\n",
+		}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"imports.svh\"\n  `include \"defs.svh\"\nendpackage\n")
+
+	locs, ok := ix.FindDefinition("file:///defs.svh", 0, 10, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common) = %+v, %v", locs, ok)
+	}
+}
+
+func TestSpecificImportThroughAnIncludeGrantsOnlyThatName(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::t_common;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top;\n  t_common c;\n  t_other o;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false); !ok {
+		t.Fatalf("expected the specifically imported name to resolve")
+	}
+	if _, ok := ix.FindDefinition("file:///top.sv", 3, 2, "t_other", "", false); ok {
+		t.Fatalf("expected a name the specific import doesn't grant to stay unresolved")
+	}
+}
+
+func TestContainerScopedImportInAHeaderDoesNotLeakToTheIncluder(t *testing.T) {
+	// The import is inside a module declared in the header, so it's that
+	// module's, not the includer's -- only a header's file-scope imports
+	// carry across.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"helper.svh": "module helper;\n  import common_pkg::*;\nendmodule\n",
+		}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"helper.svh\"\nmodule top;\n  t_common c;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false); ok {
+		t.Fatalf("expected an import scoped to a container inside the header not to leak")
+	}
+}
+
+func TestImportInAHeaderIsNotVisibleToAFileThatDoesNotIncludeIt(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top; endmodule\n")
+	ix.SetFile("file:///b.sv", "module b;\n  t_common c;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///b.sv", 1, 2, "t_common", "", false); ok {
+		t.Fatalf("expected b.sv not to see an import it never included")
+	}
+}
+
+func TestIncludedImportStopsResolvingWhenTheIncludeGoesAway(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top;\n  t_common c;\nendmodule\n")
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false); !ok {
+		t.Fatalf("expected t_common to resolve while the `include is there")
+	}
+
+	ix.SetFile("file:///top.sv", "module top;\n  t_common c;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 1, 2, "t_common", "", false); ok {
+		t.Fatalf("expected t_common to stop resolving once top.sv dropped its `include")
+	}
+}
+
+func TestDirectImportWinsOverOneReachedThroughAnInclude(t *testing.T) {
+	// Both packages declare "foo". The import written in top.sv itself is
+	// the more specific statement of intent, so the included one isn't
+	// consulted at all and the result stays unambiguous.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import pkg_a::*;\n"}}
+	})
+	ix.SetFile("file:///pkg_a.sv", "package pkg_a;\n  typedef logic foo;\nendpackage\n")
+	ix.SetFile("file:///pkg_b.sv", "package pkg_b;\n  typedef logic foo;\nendpackage\n")
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nimport pkg_b::*;\nmodule top;\n  foo f;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///top.sv", 3, 2, "foo", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///pkg_b.sv" {
+		t.Fatalf("FindDefinition(foo) = %+v, %v", locs, ok)
+	}
+}
+
 // recordDependencies replaces uri's dependency set directly, bypassing a
 // real Scan. It lives here rather than in index.go because nothing in
 // production ever calls it -- SetFile records dependencies inline via
