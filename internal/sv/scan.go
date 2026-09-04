@@ -269,7 +269,7 @@ type connectionSite struct {
 // workspace.FilelistDiscoverer.Defines), so a company-wide flag can gate
 // an `ifdef the same way an in-source `define would. Pass nil where none
 // apply.
-func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]string) (decls map[string][]Declaration, occurrences []Occurrence, diags map[string][]Diagnostic, imports map[string][]importDecl, connections map[string][]connectionSite) {
+func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]string) (decls map[string][]Declaration, occurrences []Occurrence, diags map[string][]Diagnostic, imports map[string][]importDecl, connections map[string][]connectionSite, links []memberLink) {
 	lexToks, _ := lexer.Lex(text) // lex errors don't block occurrence collection -- best-effort on malformed/mid-edit text
 	occurrences = occurrencesFromSVParseTokens(lexToks)
 
@@ -277,8 +277,8 @@ func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]s
 	f, parseErrs := parser.Parse(uri, ppToks)
 
 	diags = diagnosticsByFile(uri, ppErrs, parseErrs)
-	decls, imports, connections = declarationsFromAST(f)
-	return decls, occurrences, diags, imports, connections
+	decls, imports, connections, links = declarationsFromAST(f)
+	return decls, occurrences, diags, imports, connections, links
 }
 
 // Diagnostic is a single preprocessing or parsing problem svparse
@@ -314,7 +314,7 @@ func diagnosticsByFile(uri string, ppErrs []preprocessor.Error, parseErrs []pars
 // only want one file's own declarations and don't need cross-file include
 // resolution or initial macros -- mainly tests.
 func ScanDeclarations(uri, text string) []Declaration {
-	decls, _, _, _, _ := Scan(uri, text, nil, nil)
+	decls, _, _, _, _, _ := Scan(uri, text, nil, nil)
 	return decls[uri]
 }
 
@@ -330,27 +330,78 @@ func ScanDeclarations(uri, text string) []Declaration {
 // is a same-slice index, inherited from the flat scanner this replaced).
 // A declaration whose File differs from its lexical parent's -- the first
 // declaration on the far side of an `include boundary -- starts a fresh,
-// file-scoped (Parent -1) entry in its own bucket instead of attempting a
-// cross-file Parent link, which that flat int-index model has no way to
-// express. Nesting *within* the included file's own content is still
-// tracked normally from that point on.
-func declarationsFromAST(f *ast.File) (map[string][]Declaration, map[string][]importDecl, map[string][]connectionSite) {
+// file-scoped (Parent -1) entry in its own bucket, since that flat
+// int-index model has no way to express a cross-file Parent link. Nesting
+// *within* the included file's own content is still tracked normally from
+// that point on.
+//
+// The membership that crossing loses isn't discarded, though: each such
+// boundary is also recorded as a memberLink in a third parallel channel,
+// which is what lets Index resolve a package member declared in an
+// `include d header (see Index.membersOf/containerOf). Keeping it beside
+// the buckets rather than inside Declaration is deliberate -- every
+// existing reader of Parent, from the scope-chain walk to the document
+// outline, gets to keep its same-bucket assumption.
+func declarationsFromAST(f *ast.File) (map[string][]Declaration, map[string][]importDecl, map[string][]connectionSite, []memberLink) {
 	buckets := map[string][]Declaration{f.Path: nil}
 	impBuckets := map[string][]importDecl{f.Path: nil}
 	connBuckets := map[string][]connectionSite{f.Path: nil}
-	walkDecls(f.Decls, f.Path, -1, buckets, impBuckets, connBuckets)
-	return buckets, impBuckets, connBuckets
+	var links []memberLink
+	walkDecls(f.Decls, f.Path, -1, buckets, impBuckets, connBuckets, &links)
+	return buckets, impBuckets, connBuckets, links
 }
 
-func walkDecls(decls []ast.Decl, uri string, parent int, buckets map[string][]Declaration, impBuckets map[string][]importDecl, connBuckets map[string][]connectionSite) {
+// memberLink records that the file-scope declarations of IncludedURI were
+// lexically inside the container at (ContainerURI, ContainerIdx) -- the
+// package/class/module body an `include textually pulled them into.
+// ContainerName is carried along so a query can confirm the index still
+// denotes the same declaration before trusting the link: a container's
+// bucket can be rewritten (and its indices shifted) by a *different*
+// file's scan, and a mismatch should degrade to no match rather than
+// attach members to whatever declaration now sits at that index.
+type memberLink struct {
+	ContainerURI  string
+	ContainerIdx  int
+	ContainerName string
+	IncludedURI   string
+}
+
+func walkDecls(decls []ast.Decl, uri string, parent int, buckets map[string][]Declaration, impBuckets map[string][]importDecl, connBuckets map[string][]connectionSite, links *[]memberLink) {
 	for _, d := range decls {
 		declURI := d.Pos().File
 		p := parent
 		if declURI != uri {
-			p = -1 // crossing an `include boundary -- see declarationsFromAST
+			// Crossing an `include boundary -- see declarationsFromAST.
+			// A crossing at file scope (parent -1) records nothing: there's
+			// no container to be a member of, and plain file-scope
+			// visibility through an `include is already handled by
+			// Index.dependsOn.
+			if parent != -1 {
+				recordMemberLink(links, uri, parent, buckets[uri][parent].Name, declURI)
+			}
+			p = -1
 		}
-		addDecl(d, declURI, p, buckets, impBuckets, connBuckets)
+		addDecl(d, declURI, p, buckets, impBuckets, connBuckets, links)
 	}
+}
+
+// recordMemberLink appends one container/included-file pair, skipping a
+// duplicate -- every declaration in an included header crosses the same
+// boundary, so without this a header with 200 typedefs would record the
+// same link 200 times. The scan is linear, which is right for a list
+// holding one entry per `include inside a container body.
+func recordMemberLink(links *[]memberLink, containerURI string, containerIdx int, containerName, includedURI string) {
+	for _, l := range *links {
+		if l.ContainerURI == containerURI && l.ContainerIdx == containerIdx && l.IncludedURI == includedURI {
+			return
+		}
+	}
+	*links = append(*links, memberLink{
+		ContainerURI:  containerURI,
+		ContainerIdx:  containerIdx,
+		ContainerName: containerName,
+		IncludedURI:   includedURI,
+	})
 }
 
 // addDecl converts one AST node into its Declaration(s), appended to
@@ -365,7 +416,7 @@ func walkDecls(decls []ast.Decl, uri string, parent int, buckets map[string][]De
 // channels, consulted only by Index's instantiation-connection scoping
 // (find-references/rename). Remaining node kinds with no useful
 // representation in any model (constraints) are still silently skipped.
-func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaration, impBuckets map[string][]importDecl, connBuckets map[string][]connectionSite) {
+func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaration, impBuckets map[string][]importDecl, connBuckets map[string][]connectionSite, links *[]memberLink) {
 	switch n := d.(type) {
 	case *ast.Container:
 		idx := appendDecl(buckets, uri, Declaration{
@@ -396,7 +447,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 				Default: joinTokenText(param.Default),
 			})
 		}
-		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets)
+		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
 
 	case *ast.Class:
 		idx := appendDecl(buckets, uri, Declaration{
@@ -405,7 +456,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent,
 		})
-		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets)
+		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
 
 	case *ast.Package:
 		idx := appendDecl(buckets, uri, Declaration{
@@ -414,7 +465,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent,
 		})
-		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets)
+		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
 
 	case *ast.Function:
 		appendDecl(buckets, uri, Declaration{

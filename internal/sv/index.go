@@ -53,6 +53,14 @@ type declRef struct {
 	idx int
 }
 
+// ownedLink is a memberLink plus the URI whose scan recorded it -- the
+// same header included by two different files contributes one link from
+// each, and rescanning one of them must retract only its own.
+type ownedLink struct {
+	memberLink
+	owner string
+}
+
 // Index maps declaration names to their locations across a set of files,
 // and supports scope-aware lookup via FindDefinition. Entries are keyed by
 // URI internally so a single file's declarations can be replaced wholesale
@@ -122,6 +130,24 @@ type Index struct {
 	// directly (a connection doesn't declare a name of its own either).
 	connectionsByURI map[string][]connectionSite
 
+	// memberLinksByOwner[uri] holds every cross-`include container
+	// membership uri's own last scan recorded (see memberLink), keyed by
+	// the scanning file because that's the unit of invalidation: a rescan
+	// of uri must retract exactly the links that scan contributed, and no
+	// others.
+	//
+	// membersOf and containerOf are the two query directions derived from
+	// it, maintained together in recordMemberLinksLocked. membersOf
+	// answers "which files hold this container's included members" (for
+	// childRefsLocked, so Pkg::name and import Pkg::* reach them);
+	// containerOf answers the inverse, "which container is this file's
+	// content a member of" (for lookupInEnclosingContainersRefsLocked, so
+	// a reference written inside the header can see the rest of its own
+	// package).
+	memberLinksByOwner map[string][]memberLink
+	membersOf          map[declRef][]ownedLink
+	containerOf        map[string][]ownedLink
+
 	// resolverFactory, if set, builds a fresh IncludeResolver for each
 	// SetFile call to resolve `include directives with -- see
 	// SetIncludeResolverFactory.
@@ -141,6 +167,10 @@ func NewIndex() *Index {
 		errByURI:         make(map[string][]Diagnostic),
 		importsByURI:     make(map[string][]importDecl),
 		connectionsByURI: make(map[string][]connectionSite),
+
+		memberLinksByOwner: make(map[string][]memberLink),
+		membersOf:          make(map[declRef][]ownedLink),
+		containerOf:        make(map[string][]ownedLink),
 	}
 }
 
@@ -199,7 +229,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	if factory != nil {
 		resolver = factory()
 	}
-	declsByURI, occs, diagsByURI, importsByURI, connectionsByURI := Scan(uri, text, resolver, macros)
+	declsByURI, occs, diagsByURI, importsByURI, connectionsByURI, memberLinks := Scan(uri, text, resolver, macros)
 
 	// Group occurrences by name outside the lock; occurrencesFromSVParseTokens
 	// already interned each name to a single string per file.
@@ -250,6 +280,8 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	}
 	ix.occNamesByURI[uri] = names
 
+	ix.recordMemberLinksLocked(uri, memberLinks)
+
 	var deps []string
 	if resolver != nil {
 		deps = resolver.Resolved()
@@ -268,6 +300,64 @@ func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 		return
 	}
 	ix.dependsOn[uri] = append([]string(nil), deps...)
+}
+
+// recordMemberLinksLocked replaces owner's contribution to the cross-
+// `include membership maps with links, retracting whatever its previous
+// scan contributed first. Retraction is bounded by owner's own link count
+// rather than the workspace's, since memberLinksByOwner already names the
+// exact keys to revisit -- this runs on every keystroke, via SetFile.
+//
+// Entries from *other* owners are deliberately left in place: two files
+// including the same header into the same container each record the link,
+// and one of them being rescanned (or losing its `include) says nothing
+// about the other.
+func (ix *Index) recordMemberLinksLocked(owner string, links []memberLink) {
+	for _, l := range ix.memberLinksByOwner[owner] {
+		key := declRef{uri: l.ContainerURI, idx: l.ContainerIdx}
+		if kept := dropOwner(ix.membersOf[key], owner); len(kept) > 0 {
+			ix.membersOf[key] = kept
+		} else {
+			delete(ix.membersOf, key)
+		}
+		if kept := dropOwner(ix.containerOf[l.IncludedURI], owner); len(kept) > 0 {
+			ix.containerOf[l.IncludedURI] = kept
+		} else {
+			delete(ix.containerOf, l.IncludedURI)
+		}
+	}
+
+	if len(links) == 0 {
+		delete(ix.memberLinksByOwner, owner)
+		return
+	}
+	ix.memberLinksByOwner[owner] = links
+	for _, l := range links {
+		key := declRef{uri: l.ContainerURI, idx: l.ContainerIdx}
+		ix.membersOf[key] = append(ix.membersOf[key], ownedLink{memberLink: l, owner: owner})
+		ix.containerOf[l.IncludedURI] = append(ix.containerOf[l.IncludedURI], ownedLink{memberLink: l, owner: owner})
+	}
+}
+
+func dropOwner(links []ownedLink, owner string) []ownedLink {
+	out := links[:0:0]
+	for _, l := range links {
+		if l.owner != owner {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// containerStillNamedLocked reports whether (uri, idx) still denotes the
+// declaration a memberLink was recorded against. A container's bucket can
+// be rewritten, and its indices shifted, by a different file's scan (see
+// SetFile), so a link is only trusted while the name still matches --
+// otherwise stale membership would attach a header's declarations to
+// whatever now sits at that index.
+func (ix *Index) containerStillNamedLocked(uri string, idx int, name string) bool {
+	decls := ix.byURI[uri]
+	return idx >= 0 && idx < len(decls) && decls[idx].Name == name
 }
 
 // Dependents returns every URI whose last scan `include d uri, directly or
@@ -320,10 +410,15 @@ func (ix *Index) RemoveFile(uri string) {
 }
 
 // removeLocked drops uri's entries from every part of the index:
-// declarations, occurrences, and its dependency-graph entry.
+// declarations, occurrences, and its dependency-graph entry. Its
+// cross-`include membership links go too -- but only the ones uri's own
+// scan recorded (see recordMemberLinksLocked); links recorded by another
+// file that happens to `include uri belong to that file, and it may well
+// still exist.
 func (ix *Index) removeLocked(uri string) {
 	ix.removeDeclarationsLocked(uri)
 	ix.removeOccurrencesLocked(uri)
+	ix.recordMemberLinksLocked(uri, nil)
 	delete(ix.dependsOn, uri)
 	delete(ix.errByURI, uri)
 	delete(ix.importsByURI, uri)
@@ -517,23 +612,32 @@ func (ix *Index) preferGloballyLocked(word string, locs []Location, wantPrototyp
 //  3. Otherwise, an unqualified reference is resolved by walking outward
 //     from the declaration enclosing the click position in the current
 //     file (function -> class -> package, etc.), preferring the
-//     innermost match -- the same shadowing order the SV LRM specifies.
-//  4. If nothing in that chain matches, every package this scope can see
-//     via an "import pkg::*;"/"import pkg::name;" statement (see
-//     importsByURI, lookupInImportsRefsLocked) is searched next. An import
-//     is a first-class SV scoping construct with real lexical nesting, so
-//     it's checked before `include -- it composes with the same
-//     container-ancestor chain step 3 already walks, rather than the
-//     unscoped, file-wide visibility `include grants regardless of where
-//     the `include line itself sits.
-//  5. Still nothing? uri's own `include d files (see dependsOn) are
+//     innermost match -- the same shadowing order the SV LRM specifies --
+//     and finally that file's own file scope.
+//  4. If nothing in that chain matches, and uri's content was itself
+//     `include d into some container's body, that container's scope is
+//     searched (see lookupInEnclosingContainersRefsLocked): a declaration
+//     written in a header pulled into a package body is lexically inside
+//     that package, so the package's other members are in scope for it.
+//     It comes before the import and `include steps below for the same
+//     reason step 3 does -- it's the rest of this reference's own
+//     enclosing scope, not a name some other file made visible.
+//  5. Then every package this scope can see via an "import pkg::*;"/
+//     "import pkg::name;" statement (see importsByURI,
+//     lookupInImportsRefsLocked) is searched. An import is a first-class
+//     SV scoping construct with real lexical nesting, so it's checked
+//     before `include -- it composes with the same container-ancestor
+//     chain step 3 already walks, rather than the unscoped, file-wide
+//     visibility `include grants regardless of where the `include line
+//     itself sits.
+//  6. Still nothing? uri's own `include d files (see dependsOn) are
 //     searched next, unrestricted by Kind -- unlike the global fallback
 //     below, an `include is an explicit dependency the file itself
 //     declared, so a typedef/parameter/anything else visible through it is
 //     legitimately in scope, not a guess. This is what makes a type
 //     declared in a shared header resolve from every file that includes
 //     it.
-//  6. Only then does it fall back to a global search restricted to
+//  7. Only then does it fall back to a global search restricted to
 //     module/interface/program/class/package names, since those are the
 //     kinds realistically referenceable by bare name from anywhere in the
 //     workspace regardless of any `include; a bare cross-file function/
@@ -549,6 +653,10 @@ func (ix *Index) resolveRefsLocked(uri string, line, character int, word, qualif
 	}
 
 	if refs, ok := ix.lookupInScopeRefsLocked(uri, line, character, word); ok {
+		return refs, true
+	}
+
+	if refs, ok := ix.lookupInEnclosingContainersRefsLocked(uri, word); ok {
 		return refs, true
 	}
 
@@ -957,15 +1065,103 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 	return top.sorted()
 }
 
-// childRefsLocked returns every declRef in uri's bucket that's a direct
-// child of the declaration at containerIdx and named name -- the shared
-// primitive behind both qualified (Pkg::name) lookup and import-based
-// (wildcard/specific) resolution.
+// childRefsLocked returns every declRef that's a direct child of the
+// declaration at (uri, containerIdx) and named name -- the shared
+// primitive behind qualified (Pkg::name) lookup, import-based
+// (wildcard/specific) resolution, and instantiation port lookup.
+//
+// Children come from two places. Most are in the container's own bucket,
+// carrying its index as their Parent. The rest arrived through an
+// `include in the container's body: those live in the included file's
+// bucket at file scope (Parent -1), since Parent can't point across
+// files, and membersOf is what remembers they're members at all (see
+// memberLink). Whether a package member was typed inline or textually
+// included is a source-organization detail; after preprocessing both are
+// members of the same package scope, so both are found here.
 func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []declRef {
 	var out []declRef
 	for i, d := range ix.byURI[uri] {
 		if d.Parent == containerIdx && d.Name == name {
 			out = append(out, declRef{uri: uri, idx: i})
+		}
+	}
+	for _, l := range ix.membersOf[declRef{uri: uri, idx: containerIdx}] {
+		if !ix.containerStillNamedLocked(uri, containerIdx, l.ContainerName) {
+			continue
+		}
+		for i, d := range ix.byURI[l.IncludedURI] {
+			// Only file scope: nesting *within* the included file is
+			// tracked normally, so a typedef inside a class inside the
+			// header is that class's child, not the container's.
+			if d.Parent != -1 || d.Name != name {
+				continue
+			}
+			// The same header included by two different files yields two
+			// links to one bucket.
+			if ref := (declRef{uri: l.IncludedURI, idx: i}); !slices.Contains(out, ref) {
+				out = append(out, ref)
+			}
+		}
+	}
+	return out
+}
+
+// lookupInEnclosingContainersRefsLocked resolves word from inside a file
+// whose own content was `include d into some container's body: the
+// mirror of childRefsLocked's extra step. A declaration written in such a
+// header is lexically inside that package/class/module, so the rest of
+// that scope is visible to it -- its siblings typed inline in the file
+// that opens the container, the members of its *other* headers (one
+// childRefsLocked call reaches both), and whatever the container itself
+// imports.
+//
+// Container members are preferred over the container's imports, matching
+// the LRM's rule that a real declaration in a scope shadows a name a
+// wildcard import merely makes visible there.
+func (ix *Index) lookupInEnclosingContainersRefsLocked(uri, word string) ([]declRef, bool) {
+	var out []declRef
+	for _, l := range ix.containerOf[uri] {
+		if !ix.containerStillNamedLocked(l.ContainerURI, l.ContainerIdx, l.ContainerName) {
+			continue
+		}
+		refs := ix.childRefsLocked(l.ContainerURI, l.ContainerIdx, word)
+		if len(refs) == 0 {
+			refs = ix.containerImportRefsLocked(l.ContainerURI, l.ContainerIdx, word)
+		}
+		for _, ref := range refs {
+			if !slices.Contains(out, ref) {
+				out = append(out, ref)
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// containerImportRefsLocked resolves word through the imports visible
+// inside the container at (containerURI, containerIdx) -- the container's
+// own body imports plus its file's file-scope ones, the same visibility
+// importVisibleAtLocked computes for a position, minus the position (a
+// caller here is in a different file entirely, so there's no container-
+// ancestor chain of its own to walk). Kind and member matching mirror
+// lookupInImportsRefsLocked, which does the same job for imports written
+// in the referencing file itself.
+func (ix *Index) containerImportRefsLocked(containerURI string, containerIdx int, word string) []declRef {
+	var out []declRef
+	for _, imp := range ix.importsByURI[containerURI] {
+		if imp.Parent != containerIdx && imp.Parent != -1 {
+			continue
+		}
+		if imp.Member != "*" && imp.Member != word {
+			continue
+		}
+		for _, qref := range ix.byName[imp.Package] {
+			if ix.byURI[qref.uri][qref.idx].Kind != KindPackage {
+				continue
+			}
+			out = append(out, ix.childRefsLocked(qref.uri, qref.idx, word)...)
 		}
 	}
 	return out
@@ -1085,6 +1281,11 @@ func (ix *Index) lookupSelfRefLocked(uri string, line, character int, word strin
 	return nil, false
 }
 
+// lookupInScopeRefsLocked walks outward from the container enclosing
+// (line, character), innermost first, and then searches uri's own file
+// scope -- the outermost rung, which the walk itself can't reach: -1 is
+// both "file scope" and the loop's terminator, so a file-scope typedef
+// used inside a module in the same file would otherwise never match.
 func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name string) ([]declRef, bool) {
 	decls := ix.byURI[uri]
 	idx := innermostContaining(decls, line, character)
@@ -1099,6 +1300,9 @@ func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name s
 			return out, true
 		}
 		idx = decls[idx].Parent
+	}
+	if out := ix.childRefsLocked(uri, -1, name); len(out) > 0 {
+		return out, true
 	}
 	return nil, false
 }

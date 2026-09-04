@@ -1179,3 +1179,42 @@ func TestTextDocumentCompletionStructMemberFallsBackToNilWhenReceiverIsNotAStruc
 		t.Fatalf("expected a nil result for a non-struct receiver with an empty prefix, got %#v", result)
 	}
 }
+
+func TestTextDocumentCompletionSuggestsStructMembersForIncludedPackageType(t *testing.T) {
+	// The receiver's type is declared in a header included into a package
+	// body, so its Declaration lives in the header's bucket with no
+	// Parent link back to the package.
+	s := newTestServer()
+	s.Index().SetIncludeResolverFactory(func() sv.IncludeResolver {
+		return &mapResolver{files: map[string]string{
+			"cfg_defs.svh": "  typedef struct packed { logic [7:0] unique_field; logic flag; } t_header_cfg;\n",
+		}}
+	})
+	s.Index().SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
+
+	uri := "file:///a.sv"
+	src := "module top;\n  pkg_cfg::t_header_cfg cfg;\n  cfg.\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  cfg." on line 2 ends at character 6, right after the dot.
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 2, Character: 6},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 struct-member items, got %#v", result)
+	}
+	if items[0].Label != "unique_field" || items[1].Label != "flag" {
+		t.Fatalf("expected [unique_field, flag], got [%s, %s]", items[0].Label, items[1].Label)
+	}
+}

@@ -202,3 +202,49 @@ func BenchmarkDocumentSymbolTreeWideModule(b *testing.B) {
 		documentSymbolTree(decls, childIndex(decls), -1)
 	}
 }
+
+// mapResolver resolves `include directives from an in-memory map, the
+// lspserver-side counterpart to internal/sv's own stubResolver (which is
+// unexported there).
+type mapResolver struct {
+	files    map[string]string
+	resolved []string
+}
+
+func (r *mapResolver) Resolve(includedPath, fromFile string) (text, resolvedPath string, err error) {
+	t, ok := r.files[includedPath]
+	if !ok {
+		return "", "", fmt.Errorf("mapResolver: %q not found", includedPath)
+	}
+	uri := "file:///" + includedPath
+	r.resolved = append(r.resolved, uri)
+	return t, uri, nil
+}
+
+func (r *mapResolver) Resolved() []string { return append([]string(nil), r.resolved...) }
+
+func TestDocumentSymbolKeepsIncludedDeclarationsAtTheHeadersOwnRoot(t *testing.T) {
+	// A declaration pulled into a package body still belongs to the
+	// header's own outline, at its root: cross-`include membership is
+	// tracked beside the buckets, never as a Parent pointing into another
+	// file's slice, which childIndex would drop and documentSymbolTree
+	// would never root.
+	s := newTestServer()
+	s.Index().SetIncludeResolverFactory(func() sv.IncludeResolver {
+		return &mapResolver{files: map[string]string{
+			"cfg_defs.svh": "typedef struct { int fieldA; } t_header_cfg;\n",
+		}}
+	})
+	s.Index().SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
+
+	result, err := s.TextDocumentDocumentSymbol(nil, &protocol.DocumentSymbolParams{
+		TextDocument: protocol.TextDocumentIdentifier{URI: "file:///cfg_defs.svh"},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentDocumentSymbol: %v", err)
+	}
+	tree, ok := result.([]protocol.DocumentSymbol)
+	if !ok || len(tree) != 1 || tree[0].Name != "t_header_cfg" {
+		t.Fatalf("expected exactly [t_header_cfg] at the header's outline root, got %#v", result)
+	}
+}
