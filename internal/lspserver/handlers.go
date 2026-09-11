@@ -284,6 +284,12 @@ func (s *Server) resolveWordAt(
 		}
 	}
 
+	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
+		if loc, ok := s.structFieldLocation(uri, text, line, character, receiver, receiverStart, word); ok {
+			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+		}
+	}
+
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
 	locs, ok := resolve(uri, line, character, word, qualifier, hasQualifier)
@@ -291,6 +297,25 @@ func (s *Server) resolveWordAt(
 		return nil, nil
 	}
 	return formatLocations(locs, word), nil
+}
+
+// structFieldLocation resolves "receiver.word" to the field's own
+// declaration inside its struct/union typedef, mirroring structFieldHover
+// on the query side.
+//
+// Without it, goto-definition was the last cursor handler still resolving
+// a field access by plain name: hover (structFieldHover) and
+// references/rename/highlight (ScopedOccurrencesForStructField) both go
+// through the receiver's type, so on "link.addr" where some unrelated
+// module also declares a port "addr", hover was right and F12 jumped into
+// the unrelated module -- silently wrong rather than simply empty.
+func (s *Server) structFieldLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.TypeName == "" {
+		return sv.Location{}, false
+	}
+	return s.index.StructFieldLocation(recv.TypeName, word)
 }
 
 // includeLocations matches an `include's written path against the URIs the

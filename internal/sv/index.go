@@ -623,7 +623,7 @@ func (ix *Index) FindDefinition(uri string, line, character int, word, qualifier
 		return nil, false
 	}
 	locs := ix.locationsLocked(refs)
-	if preferred, ok := ix.preferGloballyLocked(word, locs, false); ok {
+	if preferred, ok := ix.preferGloballyLocked(word, refs, locs, false); ok {
 		return preferred, true
 	}
 	return locs, true
@@ -645,7 +645,7 @@ func (ix *Index) FindDeclaration(uri string, line, character int, word, qualifie
 		return nil, false
 	}
 	locs := ix.locationsLocked(refs)
-	if preferred, ok := ix.preferGloballyLocked(word, locs, true); ok {
+	if preferred, ok := ix.preferGloballyLocked(word, refs, locs, true); ok {
 		return preferred, true
 	}
 	return locs, true
@@ -677,10 +677,11 @@ func (ix *Index) HoverInfo(uri string, line, character int, word, qualifier stri
 // for same-name declarations with the desired Prototype-ness, restricted
 // to the same Kind as locs' entries (so, e.g., preferring a prototype
 // never substitutes in an unrelated module of the same name).
-func (ix *Index) preferGloballyLocked(word string, locs []Location, wantPrototype bool) ([]Location, bool) {
+func (ix *Index) preferGloballyLocked(word string, refs []declRef, locs []Location, wantPrototype bool) ([]Location, bool) {
 	if len(locs) == 0 {
 		return nil, false
 	}
+	wantContainer := ix.containerNameOfLocked(refs[0])
 	for _, l := range locs {
 		if l.Prototype == wantPrototype {
 			return nil, false // already what the caller wants; nothing to substitute
@@ -688,23 +689,71 @@ func (ix *Index) preferGloballyLocked(word string, locs []Location, wantPrototyp
 	}
 
 	kind := locs[0].Kind
-	var out []Location
+	var sameFile, sameContainer, anywhere []Location
 	for _, r := range ix.byName[word] {
 		d := ix.byURI[r.uri][r.idx]
-		if d.Kind == kind && d.Prototype == wantPrototype {
-			out = append(out, ix.locationLocked(r))
+		if d.Kind != kind || d.Prototype != wantPrototype {
+			continue
+		}
+		loc := ix.locationLocked(r)
+		container := ix.containerNameOfLocked(r)
+		switch {
+		case r.uri == locs[0].URI:
+			sameFile = append(sameFile, loc)
+		case container != "" && container == wantContainer:
+			sameContainer = append(sameContainer, loc)
+		default:
+			anywhere = append(anywhere, loc)
 		}
 	}
-	if len(out) == 0 {
-		return nil, false
+	// Ranked, not merged. The filter is name + Kind + Prototype only, with
+	// no scope anywhere in it, so in UVM-style code -- where hundreds of
+	// classes each define build_phase, run_phase, do_copy and new -- the
+	// unranked set is hundreds of locations of which at most one is right.
+	// Preferring the resolved declaration's own file, then its own
+	// enclosing container, keeps the common case exact; falling back to
+	// the whole workspace preserves the cross-file "extern prototype here,
+	// out-of-line body there" case this exists for in the first place.
+	for _, tier := range [][]Location{sameFile, sameContainer, anywhere} {
+		if len(tier) > 0 {
+			return tier, true
+		}
 	}
-	return out, true
+	return nil, false
+}
+
+// containerNameOfLocked returns the name of the declaration enclosing r,
+// or "" if r is at file scope.
+func (ix *Index) containerNameOfLocked(r declRef) string {
+	decls := ix.byURI[r.uri]
+	if parent := decls[r.idx].Parent; parent != -1 {
+		return decls[parent].Name
+	}
+	return ""
 }
 
 // isContainerKind reports whether d is a module/interface/program, the
 // three kinds that carry a port and parameter list.
 func isContainerKind(d Declaration) bool {
 	return d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram
+}
+
+// appendUniqueRefs appends refs to out, skipping any already present.
+//
+// The same declaration legitimately arrives twice: "import pkg::*;" at
+// file scope AND in a module header (a common belt-and-braces pattern)
+// both resolve to it, and returning it twice makes an editor render two
+// identical entries in its peek list. The three sibling lookups
+// (includedImportRefsLocked, childRefsLocked,
+// lookupInEnclosingContainersRefsLocked) already guarded against this
+// individually; this is the shared form.
+func appendUniqueRefs(out []declRef, refs ...declRef) []declRef {
+	for _, r := range refs {
+		if !slices.Contains(out, r) {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // firstDeclLocked returns the deterministically-first declaration named
@@ -894,7 +943,7 @@ func (ix *Index) lookupInImportsRefsLocked(uri string, line, character int, word
 		if !ix.importVisibleAtLocked(uri, imp, line, character) {
 			continue
 		}
-		out = append(out, ix.importMemberRefsLocked(imp, word)...)
+		out = appendUniqueRefs(out, ix.importMemberRefsLocked(imp, word)...)
 	}
 	if len(out) == 0 {
 		out = ix.includedImportRefsLocked(uri, word)
@@ -983,7 +1032,13 @@ func (ix *Index) lookupInIncludesRefsLocked(uri, word string) ([]declRef, bool) 
 	}
 	var out []declRef
 	for _, r := range ix.byName[word] {
-		if depSet[r.uri] {
+		// File scope only. An `include makes the header's top-level
+		// content visible to the includer, but a name declared inside a
+		// module/class/package in that header is not in scope unqualified
+		// -- resolving it here is a WRONG answer that masks a real compile
+		// error, and hover and rename then propagate it. Same rule
+		// childRefsLocked applies to the membership direction.
+		if depSet[r.uri] && ix.byURI[r.uri][r.idx].Parent == -1 {
 			out = append(out, r)
 		}
 	}
@@ -1015,6 +1070,29 @@ func (ix *Index) Params(name string) ([]Port, bool) {
 	defer ix.mu.RUnlock()
 	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
 	return d.Params, ok
+}
+
+// StructFieldLocation returns where field is declared inside the struct or
+// union typedef named typeName.
+//
+// A field has no Declaration of its own (it lives on the typedef, as
+// Declaration.Fields), so this is the only way to point at one -- what
+// goto-definition on "receiver.field" needs, alongside the receiver-type
+// resolution hover and completion already do. Port.Line/Character are
+// populated for typedef fields specifically; see structUnionFields.
+func (ix *Index) StructFieldLocation(typeName, field string) (Location, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	ref, fields, ok := ix.structTypedefLocked(typeName)
+	if !ok {
+		return Location{}, false
+	}
+	for _, f := range fields {
+		if f.Name == field {
+			return Location{URI: ref.uri, Line: f.Line, Character: f.Character}, true
+		}
+	}
+	return Location{}, false
 }
 
 // StructFields returns the field list of a struct or union typedef named
@@ -1464,7 +1542,7 @@ func (ix *Index) containerImportRefsLocked(containerURI string, containerIdx int
 		if imp.Parent != containerIdx && imp.Parent != -1 {
 			continue
 		}
-		out = append(out, ix.importMemberRefsLocked(imp, word)...)
+		out = appendUniqueRefs(out, ix.importMemberRefsLocked(imp, word)...)
 	}
 	if len(out) == 0 {
 		// The import may itself have arrived through a *different*
