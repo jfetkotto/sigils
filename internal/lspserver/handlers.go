@@ -52,12 +52,22 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s.mu.Lock()
+	// glsp gates only NON-initialize methods before initialization, so a
+	// client that re-handshakes on the same connection lands here twice.
+	// Without cancelling the first run, its worker pool and its fsnotify
+	// watcher (one open fd per watched directory) leak for the life of the
+	// process: Shutdown can only ever cancel the newest.
+	prevCancel := s.watchCancel
 	s.root = root
 	s.cfg = cfg
 	s.discoverer = discoverer
 	s.watchCancel = cancel
 	s.snippetSupport = clientSupportsSnippets(params)
 	s.mu.Unlock()
+	if prevCancel != nil {
+		s.Log.Warning("initialize received again; cancelling the previous indexing pass")
+		prevCancel()
+	}
 
 	// Indexing can mean scanning a large chip workspace's worth of files,
 	// so it runs in the background rather than blocking the handshake.
@@ -133,7 +143,12 @@ func (s *Server) SetTrace(context *glsp.Context, params *protocol.SetTraceParams
 func (s *Server) TextDocumentDidOpen(context *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
 	doc := params.TextDocument
 	s.docs.Open(document.URI(doc.URI), doc.LanguageID, doc.Version, doc.Text)
-	s.publishDiagnostics(s.index.SetFile(doc.URI, doc.Text))
+	// The document store takes anything the client opens, so hover and
+	// completion work in that buffer; the workspace index takes only real
+	// files -- see isFileURI.
+	if isFileURI(doc.URI) {
+		s.publishDiagnostics(s.index.SetFile(doc.URI, doc.Text))
+	}
 	s.Log.Infof("opened %s", doc.URI)
 	return nil
 }
@@ -161,7 +176,9 @@ func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.D
 	if !s.docs.ApplyFullChange(document.URI(params.TextDocument.URI), params.TextDocument.Version, text) {
 		s.Log.Warningf("didChange for unknown document %s", params.TextDocument.URI)
 	}
-	s.publishDiagnostics(s.index.SetFile(string(params.TextDocument.URI), text))
+	if isFileURI(string(params.TextDocument.URI)) {
+		s.publishDiagnostics(s.index.SetFile(string(params.TextDocument.URI), text))
+	}
 	return nil
 }
 

@@ -3,7 +3,9 @@ package lspserver
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/jfetkotto/sigils/internal/document"
 	"github.com/jfetkotto/sigils/internal/workspace"
@@ -419,5 +421,43 @@ func TestRebuildIndexDropsIncludeDiscoveredFileOnceIncludeIsRemoved(t *testing.T
 
 	if _, ok := s.Index().Lookup("bus_t"); ok {
 		t.Fatalf("expected bus_t to be dropped once top.sv no longer includes defs.svh")
+	}
+}
+
+// docs.Get and index.SetFile are not atomic together, so an edit landing
+// between them let a background pass write the pre-edit text over the
+// post-edit text the handler had already indexed. scanOpenBuffer converges
+// by re-reading after the write.
+func TestScanOpenBufferConvergesOnTheNewestText(t *testing.T) {
+	s := newTestServer()
+	const uri = "file:///top.sv"
+	s.docs.Open(document.URI(uri), "systemverilog", 1, "module first_name;\nendmodule\n")
+
+	// Simulate the edit landing mid-scan: the store is updated once, from
+	// another goroutine, while scanOpenBuffer is running.
+	var once sync.Once
+	go func() {
+		once.Do(func() {
+			s.docs.ApplyFullChange(document.URI(uri), 2, "module second_name;\nendmodule\n")
+		})
+	}()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		s.scanOpenBuffer(uri)
+		doc, _ := s.docs.Get(document.URI(uri))
+		if doc.Version == 2 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the simulated edit never landed")
+		}
+	}
+
+	if _, ok := s.Index().Lookup("second_name"); !ok {
+		t.Fatalf("index did not converge on the newest text")
+	}
+	if _, ok := s.Index().Lookup("first_name"); ok {
+		t.Fatalf("stale pre-edit declaration survived the scan")
 	}
 }

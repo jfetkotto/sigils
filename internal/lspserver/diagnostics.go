@@ -1,8 +1,6 @@
 package lspserver
 
 import (
-	"strings"
-
 	protocol "github.com/tliron/glsp/protocol_3_16"
 
 	"github.com/jfetkotto/sigils/internal/sv"
@@ -29,7 +27,7 @@ func (s *Server) publishDiagnostics(uris []string) {
 		return
 	}
 	for _, uri := range uris {
-		if !strings.HasPrefix(uri, "file://") {
+		if !isFileURI(uri) {
 			if diags := s.index.Diagnostics(uri); len(diags) > 0 {
 				s.Log.Warningf("diagnostics for non-file %q not published to the client: %+v", uri, diags)
 			}
