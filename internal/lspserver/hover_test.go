@@ -6,8 +6,6 @@ import (
 	"testing"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
-
-	"github.com/jfetkotto/sigils/internal/document"
 )
 
 func TestTextDocumentHoverModule(t *testing.T) {
@@ -883,33 +881,5 @@ func TestDocumentHighlightStillCoversTheWholeFile(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("expected the declaration and both uses, got %+v", got)
-	}
-}
-
-func BenchmarkDocumentHighlightKeyword(b *testing.B) {
-	s := newTestServer()
-	var src strings.Builder
-	src.WriteString("module top;\n")
-	for i := range 400 {
-		fmt.Fprintf(&src, "  initial begin\n    sig%d = 1;\n  end\n", i)
-	}
-	src.WriteString("endmodule\n")
-	for i := range 40 {
-		s.index.SetFile(fmt.Sprintf("file:///f%d.sv", i), src.String())
-	}
-
-	params := &protocol.DocumentHighlightParams{
-		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
-			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///f0.sv"},
-			Position:     protocol.Position{Line: 1, Character: 11},
-		},
-	}
-	s.docs.Open(document.URI("file:///f0.sv"), "systemverilog", 1, src.String())
-
-	b.ResetTimer()
-	for range b.N {
-		if _, err := s.TextDocumentDocumentHighlight(nil, params); err != nil {
-			b.Fatal(err)
-		}
 	}
 }
