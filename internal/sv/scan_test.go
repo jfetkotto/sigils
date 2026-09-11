@@ -1246,3 +1246,41 @@ func TestOccurrencesRecordNoReceiverForNamedPortConnection(t *testing.T) {
 		}
 	}
 }
+
+// svparse v0.1.6 bounded its skip helpers: an unclosed "begin" used to pin
+// the block depth above zero, so the statement skip ran to end of file and
+// every later declaration vanished from the index. Pinned here because the
+// symptom is entirely downstream -- the user sees modules missing from
+// goto-definition and workspace symbols, in files they never edited.
+func TestScanKeepsDeclarationsAfterAnUnclosedBegin(t *testing.T) {
+	decls := ScanDeclarations("file:///a.sv", "module a;\n  always_comb begin\n    x = 1;\nendmodule\n\nmodule b;\nendmodule\n")
+
+	var names []string
+	for _, d := range decls {
+		if d.Kind == KindModule {
+			names = append(names, d.Name)
+		}
+	}
+	if len(names) != 2 || names[0] != "a" || names[1] != "b" {
+		t.Fatalf("expected modules a and b, got %v", names)
+	}
+}
+
+// A parameterized class type declaration used to be misparsed as a module
+// instantiation, so the variable had no Declaration at all.
+func TestScanRecordsParameterizedClassTypedVariable(t *testing.T) {
+	decls := ScanDeclarations("file:///a.sv", "module top;\n  my_class #(8) obj;\nendmodule\n")
+
+	for _, d := range decls {
+		if d.Name == "obj" {
+			if d.Kind != KindVariable {
+				t.Fatalf("expected obj to be a variable, got %v", d.Kind)
+			}
+			if d.TypeName != "my_class" {
+				t.Fatalf("expected TypeName my_class, got %q", d.TypeName)
+			}
+			return
+		}
+	}
+	t.Fatalf("obj was not indexed at all: %+v", decls)
+}
