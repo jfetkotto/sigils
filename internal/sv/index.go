@@ -40,7 +40,16 @@ type SymbolLocation struct {
 
 // Occurrence is a single identifier token: its text and position.
 type Occurrence struct {
-	Name      string
+	Name string
+	// Receiver is the identifier this occurrence was written as a field of
+	// ("st_bundle" for the "ckSideband" in "st_bundle.ckSideband"), "" when
+	// the occurrence isn't a "<ident>.<Name>" access at all. Recorded at
+	// scan time rather than re-derived per query because the index keeps no
+	// document text: filtering a workspace-wide candidate list by receiver
+	// would otherwise mean re-reading every candidate's file (see
+	// ScopedOccurrencesForStructField). Interned alongside Name, so a field
+	// accessed hundreds of times off one receiver costs one string.
+	Receiver  string
 	Line      int
 	Character int
 }
@@ -877,6 +886,17 @@ func (ix *Index) Params(name string) ([]Port, bool) {
 func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
+	_, fields, ok := ix.structTypedefLocked(typeName)
+	return fields, ok
+}
+
+// structTypedefLocked is StructFields' body, additionally handing back a
+// reference to the typedef declaration itself.
+// ScopedOccurrencesForStructField needs the typedef's own source span,
+// because a field has no Declaration of its own whose position it could
+// look up instead (see Declaration.Fields, which reuses Port's
+// name-and-detail shape and carries no position).
+func (ix *Index) structTypedefLocked(typeName string) (declRef, []Port, bool) {
 	for _, r := range ix.byName[typeName] {
 		d := ix.byURI[r.uri][r.idx]
 		if d.Kind != KindTypedef {
@@ -884,10 +904,103 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 		}
 		switch d.TypedefKind {
 		case "struct", "union":
-			return d.Fields, true
+			return r, d.Fields, true
 		}
 	}
-	return nil, false
+	return declRef{}, nil, false
+}
+
+// ScopedOccurrencesForStructField returns every occurrence of field that is
+// itself a "<x>.field" access whose receiver has the same struct/union type
+// receiver has at (uri, line, character), plus field's own declaration site
+// inside that typedef's body. ok is false when the query isn't a struct-field
+// access after all -- receiver doesn't resolve, isn't struct/union-typed, or
+// that struct has no field by this name -- and the caller then falls back to
+// plain ScopedOccurrences, exactly as structFieldHover falls back to HoverInfo.
+//
+// It exists because struct/union members are not indexed as Declarations of
+// their own: they live only on the typedef, as Declaration.Fields. A bare
+// field name therefore resolves to nothing, and ScopedOccurrences hands back
+// its unscoped, name-wide fallback -- every identically-spelled identifier in
+// the workspace, unrelated modules' ports and signals included. That fallback
+// is right for a genuinely unresolvable name and wrong here, where the
+// information needed to resolve the query (the receiver's type) is sitting in
+// the query itself.
+//
+// Occurrence.Receiver is what makes the result-side filter affordable: only
+// occurrences that are a field access at all get resolved, so a common field
+// name's thousands of bare-identifier occurrences are rejected on a string
+// comparison rather than a scope-chain walk each.
+//
+// Candidate receivers are resolved unqualified -- the token stream records
+// the identifier before the dot and not any "pkg::" ahead of it -- so an
+// access written "pkg::st.field" simply won't match and drops out. Receiver
+// types are compared by bare TypeName, matching what StructFields itself
+// does, so two same-named struct typedefs in different packages still merge:
+// a pre-existing limitation shared with hover and completion, not one
+// introduced here.
+func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int, receiver, qualifier string, hasQualifier bool, field string) ([]Location, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+
+	typeName, ok := ix.receiverTypeNameLocked(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok {
+		return nil, false
+	}
+	typedef, fields, ok := ix.structTypedefLocked(typeName)
+	if !ok {
+		return nil, false
+	}
+	i := slices.IndexFunc(fields, func(f Port) bool { return f.Name == field })
+	if i < 0 {
+		return nil, false
+	}
+	decl := fields[i]
+
+	bucket := ix.occByName[field]
+	uris := make([]string, 0, len(bucket))
+	for u := range bucket {
+		uris = append(uris, u)
+	}
+	sort.Strings(uris) // map order is nondeterministic; occurrencesLocked sorts for the same reason
+
+	var out []Location
+	for _, u := range uris {
+		for _, occ := range bucket[u] {
+			var keep bool
+			switch {
+			case occ.Receiver != "":
+				t, ok := ix.receiverTypeNameLocked(u, occ.Line, occ.Character, occ.Receiver, "", false)
+				keep = ok && t == typeName
+			case u == typedef.uri:
+				// The field's own declaration inside the typedef body, which
+				// has no receiver to match on. Matched by the position
+				// Port.Line/Character recorded for it, the only one a field
+				// has -- a struct body pulled in across an `include boundary
+				// therefore won't match here, the same cross-file gap
+				// Declaration.Fields has generally.
+				keep = occ.Line == decl.Line && occ.Character == decl.Character
+			}
+			if keep {
+				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+			}
+		}
+	}
+	return out, true
+}
+
+// receiverTypeNameLocked resolves receiver at (uri, line, character) and
+// reports its declared type's bare name -- the same Declaration.TypeName
+// struct-member completion and hover already key off.
+func (ix *Index) receiverTypeNameLocked(uri string, line, character int, receiver, qualifier string, hasQualifier bool) (string, bool) {
+	refs, ok := ix.resolveRefsLocked(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || len(refs) == 0 {
+		return "", false
+	}
+	if d := ix.byURI[refs[0].uri][refs[0].idx]; d.TypeName != "" {
+		return d.TypeName, true
+	}
+	return "", false
 }
 
 // Typedef returns the full Declaration of a typedef named name, if one

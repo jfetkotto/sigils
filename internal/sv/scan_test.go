@@ -1209,3 +1209,40 @@ func TestIsIdentifierMatchesTheLexer(t *testing.T) {
 		}
 	}
 }
+
+func TestOccurrencesRecordDotReceiver(t *testing.T) {
+	// Recorded off token adjacency, so whitespace around the dot is
+	// immaterial -- unlike DotReceiverAt, which works on raw line text.
+	text := "module top;\n  assign a = st_bundle.ckSideband;\n  assign b = spaced . field;\n  logic bare;\nendmodule\n"
+	_, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+
+	recv := make(map[string]string)
+	for _, o := range occs {
+		recv[o.Name] = o.Receiver
+	}
+	if recv["ckSideband"] != "st_bundle" {
+		t.Fatalf("ckSideband receiver = %q, want \"st_bundle\"", recv["ckSideband"])
+	}
+	if recv["field"] != "spaced" {
+		t.Fatalf("field receiver = %q, want \"spaced\"", recv["field"])
+	}
+	if recv["bare"] != "" {
+		t.Fatalf("bare receiver = %q, want \"\"", recv["bare"])
+	}
+	if recv["st_bundle"] != "" {
+		t.Fatalf("the receiver's own occurrence should record none, got %q", recv["st_bundle"])
+	}
+}
+
+func TestOccurrencesRecordNoReceiverForNamedPortConnection(t *testing.T) {
+	// ".clk(sig)" has a dot but no identifier before it, so it must not
+	// look like a field access -- connection sites have their own scoping
+	// path (see connectionSite).
+	text := "module top;\n  leaf u_leaf (.clk(sig));\nendmodule\n"
+	_, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+	for _, o := range occs {
+		if o.Name == "clk" && o.Receiver != "" {
+			t.Fatalf("named port connection recorded receiver %q, want none", o.Receiver)
+		}
+	}
+}

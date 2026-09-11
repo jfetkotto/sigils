@@ -214,6 +214,18 @@ type Declaration struct {
 type Port struct {
 	Name   string
 	Detail string
+
+	// Line and Character locate the field's own name in source, populated
+	// only for a struct/union typedef's Declaration.Fields (see
+	// structUnionFields). A field has no Declaration of its own, so this is
+	// the only record of where it was declared, and
+	// Index.ScopedOccurrencesForStructField needs it to include the
+	// declaration site in find-references and rename -- without it, renaming
+	// a field would rewrite every access and leave the declaration behind.
+	// Left zero for a container's Ports/Params, each of which already has
+	// its own Declaration entry carrying position.
+	Line      int
+	Character int
 }
 
 // importDecl records one "import pkg::name;" / "import pkg::*;" as a
@@ -708,7 +720,8 @@ func structUnionFields(members []ast.Variable) []Port {
 	}
 	out := make([]Port, len(members))
 	for i, m := range members {
-		out[i] = Port{Name: m.Name, Detail: formatType(m.Type)}
+		pos := m.Pos()
+		out[i] = Port{Name: m.Name, Detail: formatType(m.Type), Line: pos.Line, Character: pos.Character}
 	}
 	return out
 }
@@ -767,17 +780,33 @@ func enumMemberTexts(members []ast.EnumMember) (labels, values []string) {
 // data is kept at all.
 func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 	seen := make(map[string]string)
+	intern := func(text string) string {
+		s, ok := seen[text]
+		if !ok {
+			s = text
+			seen[s] = s
+		}
+		return s
+	}
+
 	out := make([]Occurrence, 0, len(toks))
-	for _, t := range toks {
+	for i, t := range toks {
 		if t.Kind != svtoken.KindIdent && t.Kind != svtoken.KindKeyword && t.Kind != svtoken.KindSystemIdent {
 			continue
 		}
-		name, ok := seen[t.Text]
-		if !ok {
-			name = t.Text
-			seen[name] = name
+		occ := Occurrence{Name: intern(t.Text), Line: t.Line, Character: t.Character}
+		// Occurrence.Receiver, read off the token stream rather than the
+		// line text sv.DotReceiverAt works on -- which makes it both
+		// cheaper (no per-query re-derivation) and stricter about nothing
+		// but token adjacency, so "a . b" is recognized too. A named port
+		// connection (".clk(sig)") records no receiver, having no
+		// identifier before its dot; a hierarchical reference
+		// ("u_inst.sig") records one, harmlessly, since it simply won't
+		// resolve to a struct type later.
+		if i >= 2 && toks[i-1].Kind == svtoken.KindDot && toks[i-2].Kind == svtoken.KindIdent {
+			occ.Receiver = intern(toks[i-2].Text)
 		}
-		out = append(out, Occurrence{Name: name, Line: t.Line, Character: t.Character})
+		out = append(out, occ)
 	}
 	return out
 }

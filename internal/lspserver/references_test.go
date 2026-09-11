@@ -463,3 +463,102 @@ func TestTextDocumentRenameParameterDeclarationUpdatesOverrideSites(t *testing.T
 		t.Fatalf("expected exactly 1 edit in top.sv (u_leaf's override only), got %+v", topEdits)
 	}
 }
+
+// openStructFieldCollision sets up the reported shape: a struct field whose
+// name is also an unrelated module's port, connected at an instantiation.
+func openStructFieldCollision(t *testing.T, s *Server) {
+	t.Helper()
+	for uri, text := range map[string]string{
+		"file:///pkg_types.sv": "package pkg_types;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n",
+		"file:///consumer.sv":  "module mod_consumer (\n  input pkg_types::ty_bundle st_FromClock\n);\n  logic result;\n  assign result = st_FromClock.ckSideband[0];\nendmodule\n",
+		"file:///unrelated.sv": "module mod_unrelated (\n  input logic [3:0] ckSideband\n);\nendmodule\n",
+		"file:///wrapper.sv":   "module mod_unrelated_wrapper;\n  logic [3:0] sig;\n  mod_unrelated u_unrelated (.ckSideband(sig));\nendmodule\n",
+	} {
+		if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+			TextDocument: protocol.TextDocumentItem{
+				URI: protocol.DocumentUri(uri), LanguageID: "systemverilog", Version: 1, Text: text,
+			},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestTextDocumentReferencesStructFieldExcludesUnrelatedSameNamedPort(t *testing.T) {
+	s := newTestServer()
+	openStructFieldCollision(t, s)
+
+	// Cursor on "ckSideband" in "st_FromClock.ckSideband", consumer.sv line 4.
+	locs, err := s.TextDocumentReferences(nil, &protocol.ReferenceParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///consumer.sv"},
+			Position:     protocol.Position{Line: 4, Character: 31},
+		},
+		Context: protocol.ReferenceContext{IncludeDeclaration: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, l := range locs {
+		if l.URI == "file:///unrelated.sv" || l.URI == "file:///wrapper.sv" {
+			t.Fatalf("unrelated same-named port leaked in: %+v (all: %+v)", l, locs)
+		}
+	}
+	if len(locs) != 2 {
+		t.Fatalf("expected the access and the field's declaration, got %+v", locs)
+	}
+}
+
+func TestTextDocumentReferencesStructFieldFallsBackWhenReceiverIsNotAStruct(t *testing.T) {
+	s := newTestServer()
+	openStructFieldCollision(t, s)
+
+	// Cursor on the unrelated module's own "ckSideband" port declaration:
+	// no dot receiver at all, so the ordinary path must still answer.
+	locs, err := s.TextDocumentReferences(nil, &protocol.ReferenceParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///unrelated.sv"},
+			Position:     protocol.Position{Line: 1, Character: 20},
+		},
+		Context: protocol.ReferenceContext{IncludeDeclaration: true},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(locs) == 0 {
+		t.Fatalf("expected the ordinary port path to still resolve, got none")
+	}
+}
+
+func TestTextDocumentRenameStructFieldScopesToTheStructsAccesses(t *testing.T) {
+	s := newTestServer()
+	openStructFieldCollision(t, s)
+
+	edit, err := s.TextDocumentRename(nil, &protocol.RenameParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///consumer.sv"},
+			Position:     protocol.Position{Line: 4, Character: 31},
+		},
+		NewName: "ckSidebandRenamed",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if edit == nil {
+		t.Fatalf("expected a WorkspaceEdit")
+	}
+	if _, ok := edit.Changes["file:///unrelated.sv"]; ok {
+		t.Fatalf("rename reached an unrelated module's port: %+v", edit.Changes)
+	}
+	if _, ok := edit.Changes["file:///wrapper.sv"]; ok {
+		t.Fatalf("rename reached an unrelated instantiation connection: %+v", edit.Changes)
+	}
+	// The field's own declaration must be renamed too, or the accesses would
+	// be rewritten to point at a field that no longer exists.
+	if len(edit.Changes["file:///pkg_types.sv"]) != 1 {
+		t.Fatalf("expected the field's declaration to be renamed, got %+v", edit.Changes)
+	}
+	if len(edit.Changes["file:///consumer.sv"]) != 1 {
+		t.Fatalf("expected the field access to be renamed, got %+v", edit.Changes)
+	}
+}
