@@ -14,7 +14,7 @@ Produces a `sigils` binary that speaks LSP over stdio.
 
 ## Features
 
-- Go to definition / declaration
+- Go to definition / declaration, including on an `` `include`` path, which jumps to the file the include actually resolved to (through the filelist's `+incdir+` set, not a relative-path guess)
 - Hover (types, port/parameter details, doc-adjacent info)
 - Completion: symbol names, and named port/parameter-connection completion (`.name(`) at instantiation sites, snippet-aware
 - Document symbols (outline)

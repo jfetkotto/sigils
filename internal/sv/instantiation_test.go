@@ -198,3 +198,54 @@ func TestInstantiationParamNameAtDoesNotMatchPortConnection(t *testing.T) {
 		t.Fatalf("expected a port connection's name not to be mistaken for a parameter override")
 	}
 }
+
+func TestIncludePathInFindsThePathUnderTheCursor(t *testing.T) {
+	src := "`include \"defs.svh\"\n"
+	toks := Lex(src)
+	// "`include \"defs.svh\"" -- columns: 0 '`', 1-7 "include", 9 '"', 10 'd'.
+	for name, character := range map[string]int{
+		"on the directive": 3,
+		"on the basename":  11,
+		"on the extension": 16,
+		"on the quote":     9,
+	} {
+		t.Run(name, func(t *testing.T) {
+			path, inDirective, ok := IncludePathIn(toks, 0, character)
+			if !inDirective || !ok {
+				t.Fatalf("IncludePathIn(0, %d) = %q, %v, %v", character, path, inDirective, ok)
+			}
+			if path != "defs.svh" {
+				t.Fatalf("path = %q, want \"defs.svh\"", path)
+			}
+		})
+	}
+}
+
+func TestIncludePathInIgnoresACursorElsewhere(t *testing.T) {
+	toks := Lex("module top;\n  bus_t data;\nendmodule\n")
+	if _, inDirective, _ := IncludePathIn(toks, 1, 4); inDirective {
+		t.Fatalf("expected no directive at an ordinary identifier")
+	}
+}
+
+func TestIncludePathInReportsAMacroArgumentAsUnanswerable(t *testing.T) {
+	// "`include `PATH_MACRO" -- svparse doesn't expand a macro-built include
+	// path, so there's no path to hand back, but the cursor IS on a directive
+	// and must not fall through to resolving "PATH_MACRO" as an identifier.
+	toks := Lex("`include `PATH_MACRO\n")
+	path, inDirective, ok := IncludePathIn(toks, 0, 3)
+	if !inDirective || ok || path != "" {
+		t.Fatalf("IncludePathIn = %q, %v, %v; want \"\", true, false", path, inDirective, ok)
+	}
+}
+
+func TestIncludePathInDistinguishesTwoDirectivesOnOneLine(t *testing.T) {
+	src := "`include \"a.svh\" `include \"b.svh\"\n"
+	toks := Lex(src)
+	if path, _, ok := IncludePathIn(toks, 0, 11); !ok || path != "a.svh" {
+		t.Fatalf("first directive: path = %q, ok = %v", path, ok)
+	}
+	if path, _, ok := IncludePathIn(toks, 0, 28); !ok || path != "b.svh" {
+		t.Fatalf("second directive: path = %q, ok = %v", path, ok)
+	}
+}
