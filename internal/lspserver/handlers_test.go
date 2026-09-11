@@ -1439,3 +1439,36 @@ func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
 	}
 	second()
 }
+
+// Goto-definition was the last cursor handler resolving a field access by
+// plain name: hover and references/rename already went through the
+// receiver's type, so F12 on "st.ckSideband" jumped into an unrelated
+// module's same-named port -- silently wrong, not merely empty.
+func TestTextDocumentDefinitionOnStructFieldGoesToTheFieldNotASameNamedPort(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///pkg_types.sv", "package pkg_types;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n")
+	openDoc(t, s, "file:///unrelated.sv", "module mod_unrelated (\n  input logic [3:0] ckSideband\n);\nendmodule\n")
+	openDoc(t, s, "file:///consumer.sv", "module mod_consumer (\n  input pkg_types::ty_bundle st_FromClock\n);\n  logic result;\n  assign result = st_FromClock.ckSideband[0];\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///consumer.sv", 4, 31)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///pkg_types.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("expected the field's own declaration, got %+v", locs[0])
+	}
+}
+
+// A dot that isn't a struct-field access must fall through to the ordinary
+// path, exactly as hover's equivalent check does.
+func TestTextDocumentDefinitionFallsThroughWhenReceiverIsNotAStruct(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///leaf.sv", "module leaf(input logic clk);\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "module top;\n  logic clk;\n  leaf u_leaf (.clk(clk));\nendmodule\n")
+
+	// ".clk(" is a named port connection, not a field access.
+	locs := definitionAt(t, s, "file:///top.sv", 2, 16)
+	if len(locs) != 1 || locs[0].URI != "file:///leaf.sv" {
+		t.Fatalf("named port connection should still resolve to the port: %+v", locs)
+	}
+}

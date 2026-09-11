@@ -1993,3 +1993,92 @@ func TestHoverInfoPicksTheSameDeclarationRegardlessOfIndexOrder(t *testing.T) {
 		t.Fatalf("index order changed the answer: %+v vs %+v", got1, got2)
 	}
 }
+
+// An `include exposes the header's FILE scope, not what is nested inside a
+// container in it. Resolving a package member by bare name here is a wrong
+// answer that masks a real compile error.
+func TestIncludeDoesNotExposeAPackagesMembersUnqualified(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"types.svh": "package pkg_types;\n  typedef logic [7:0] addr_t;\nendpackage\n",
+		}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"types.svh\"\nmodule top;\n  addr_t sig;\nendmodule\n")
+
+	if locs, ok := ix.FindDefinition("file:///top.sv", 2, 3, "addr_t", "", false); ok {
+		t.Fatalf("a package member should not resolve by bare name through an include: %+v", locs)
+	}
+	// Qualified access to the same member must still work.
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 3, "addr_t", "pkg_types", true); !ok {
+		t.Fatalf("pkg_types::addr_t should still resolve")
+	}
+}
+
+// A file-scope declaration in an included header stays reachable -- that is
+// what an include is for, and the Parent filter must not break it.
+func TestIncludeStillExposesFileScopeDeclarations(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 3, "bus_t", "", false); !ok {
+		t.Fatalf("a file-scope typedef in an included header must still resolve")
+	}
+}
+
+// "import pkg::*;" at file scope AND in the module header is a common
+// belt-and-braces pattern; both resolve to the same declaration.
+func TestDoubleWildcardImportResolvesToOneLocation(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///pkg.sv", "package pkg;\n  typedef logic [7:0] bus_t;\nendpackage\n")
+	ix.SetFile("file:///top.sv", "import pkg::*;\nmodule top;\n  import pkg::*;\n  bus_t data;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///top.sv", 3, 3, "bus_t", "", false)
+	if !ok {
+		t.Fatalf("bus_t did not resolve")
+	}
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+}
+
+// preferGloballyLocked's filter is name + Kind + Prototype with no scope,
+// so an unrelated class's same-named method used to be offered alongside
+// (or instead of) the right one. UVM code defines build_phase in hundreds
+// of classes.
+func TestPrototypePreferenceDoesNotReachIntoAnUnrelatedClass(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "class comp_a;\n  extern function void build_phase();\nendclass\nfunction void comp_a::build_phase();\nendfunction\n")
+	ix.SetFile("file:///b.sv", "class comp_b;\n  function void build_phase();\n  endfunction\nendclass\n")
+
+	// Cursor on the extern prototype in comp_a: definition should prefer
+	// the body, and must not offer comp_b's.
+	locs, ok := ix.FindDefinition("file:///a.sv", 1, 23, "build_phase", "", false)
+	if !ok {
+		t.Fatalf("build_phase did not resolve")
+	}
+	for _, l := range locs {
+		if l.URI == "file:///b.sv" {
+			t.Fatalf("an unrelated class's method leaked in: %+v", locs)
+		}
+	}
+}
+
+func TestStructFieldLocationPointsAtTheFieldsOwnDeclaration(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///p.sv", "package pkg;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n")
+
+	loc, ok := ix.StructFieldLocation("ty_bundle", "ckSideband")
+	if !ok {
+		t.Fatalf("expected the field to be locatable")
+	}
+	if loc.URI != "file:///p.sv" || loc.Line != 2 {
+		t.Fatalf("unexpected location: %+v", loc)
+	}
+	if _, ok := ix.StructFieldLocation("ty_bundle", "nope"); ok {
+		t.Fatalf("a non-member must not resolve")
+	}
+}
