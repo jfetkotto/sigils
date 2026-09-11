@@ -157,6 +157,22 @@ type Index struct {
 	membersOf          map[declRef][]ownedLink
 	containerOf        map[string][]ownedLink
 
+	// contributedTo[owner] lists every URI owner's last scan wrote a
+	// bucket for -- itself, plus every file it reached through an
+	// `include. contributorsOf is the inverse: which owners currently
+	// back each URI's buckets.
+	//
+	// Without this pair, SetFile could only ever write the URIs the
+	// CURRENT scan produced, so a file that dropped out of a scan (an
+	// `include line deleted, a conditional now excluding it) kept its
+	// declarations and its diagnostics forever, and was absent from
+	// touchedURIs so the server never even got the chance to clear them.
+	// Same owner-keyed retraction shape as memberLinksByOwner above, for
+	// the same reason: a rescan must retract exactly what that scan
+	// contributed and nothing another file still backs.
+	contributedTo  map[string][]string
+	contributorsOf map[string]map[string]bool
+
 	// resolverFactory, if set, builds a fresh IncludeResolver for each
 	// SetFile call to resolve `include directives with -- see
 	// SetIncludeResolverFactory.
@@ -178,6 +194,8 @@ func NewIndex() *Index {
 		connectionsByURI: make(map[string][]connectionSite),
 
 		memberLinksByOwner: make(map[string][]memberLink),
+		contributedTo:      make(map[string][]string),
+		contributorsOf:     make(map[string]map[string]bool),
 		membersOf:          make(map[declRef][]ownedLink),
 		containerOf:        make(map[string][]ownedLink),
 	}
@@ -271,6 +289,15 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		touched[fileURI] = true
 		ix.connectionsByURI[fileURI] = conns
 	}
+	// Retract whatever the PREVIOUS scan of uri backed and this one no
+	// longer does -- a header whose `include line was just deleted, say.
+	// Those URIs are touched too, so their now-stale diagnostics get
+	// republished (as an empty list) rather than sitting in the editor
+	// forever.
+	for _, cleared := range ix.recordContributionsLocked(uri, touched) {
+		touched[cleared] = true
+	}
+
 	touchedURIs = make([]string, 0, len(touched))
 	for fileURI := range touched {
 		touchedURIs = append(touchedURIs, fileURI)
@@ -321,6 +348,55 @@ func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 // including the same header into the same container each record the link,
 // and one of them being rescanned (or losing its `include) says nothing
 // about the other.
+// recordContributionsLocked records that owner's latest scan backs exactly
+// the URIs in produced, and retracts whatever its previous scan backed and
+// this one does not. A URI left with no contributor at all has its buckets
+// cleared and is returned, so the caller can republish (an empty
+// diagnostic list clears the stale one in the editor).
+func (ix *Index) recordContributionsLocked(owner string, produced map[string]bool) []string {
+	var dropped []string
+	for _, prev := range ix.contributedTo[owner] {
+		if produced[prev] {
+			continue
+		}
+		backers := ix.contributorsOf[prev]
+		delete(backers, owner)
+		if len(backers) > 0 {
+			continue
+		}
+		delete(ix.contributorsOf, prev)
+		// Nothing in the workspace reaches this file any more. Clearing
+		// the declarations matters as much as the diagnostics: a name that
+		// arrived through an `include this file no longer has must stop
+		// resolving, or goto-definition keeps opening a header the build
+		// no longer reads.
+		ix.removeDeclarationsLocked(prev)
+		delete(ix.byURI, prev)
+		delete(ix.errByURI, prev)
+		delete(ix.importsByURI, prev)
+		delete(ix.connectionsByURI, prev)
+		dropped = append(dropped, prev)
+	}
+
+	if len(produced) == 0 {
+		delete(ix.contributedTo, owner)
+		return dropped
+	}
+	now := make([]string, 0, len(produced))
+	for u := range produced {
+		now = append(now, u)
+		backers := ix.contributorsOf[u]
+		if backers == nil {
+			backers = make(map[string]bool)
+			ix.contributorsOf[u] = backers
+		}
+		backers[owner] = true
+	}
+	sort.Strings(now) // stable storage order; the set semantics don't depend on it
+	ix.contributedTo[owner] = now
+	return dropped
+}
+
 func (ix *Index) recordMemberLinksLocked(owner string, links []memberLink) {
 	for _, l := range ix.memberLinksByOwner[owner] {
 		key := declRef{uri: l.ContainerURI, idx: l.ContainerIdx}
@@ -411,11 +487,14 @@ func (ix *Index) AllKnownURIs() []string {
 	return out
 }
 
-// RemoveFile drops uri's entries entirely.
-func (ix *Index) RemoveFile(uri string) {
+// RemoveFile drops uri's entries entirely, returning every OTHER URI whose
+// entries went with it -- a header uri was the last file to `include. Like
+// SetFile's return value, those need republishing so their diagnostics
+// clear.
+func (ix *Index) RemoveFile(uri string) []string {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	ix.removeLocked(uri)
+	return append(ix.removeLocked(uri), uri)
 }
 
 // removeLocked drops uri's entries from every part of the index:
@@ -424,14 +503,28 @@ func (ix *Index) RemoveFile(uri string) {
 // scan recorded (see recordMemberLinksLocked); links recorded by another
 // file that happens to `include uri belong to that file, and it may well
 // still exist.
-func (ix *Index) removeLocked(uri string) {
+func (ix *Index) removeLocked(uri string) []string {
+	// Retract what uri's own scan backed elsewhere before clearing uri
+	// itself, so an included header nothing else reaches goes too.
+	cleared := ix.recordContributionsLocked(uri, nil)
+	// uri may still be backed by another file that `include s it, but an
+	// explicit removal means gone: drop its own buckets unconditionally
+	// and stop counting it as its own backer.
+	if backers := ix.contributorsOf[uri]; backers != nil {
+		delete(backers, uri)
+		if len(backers) == 0 {
+			delete(ix.contributorsOf, uri)
+		}
+	}
 	ix.removeDeclarationsLocked(uri)
 	ix.removeOccurrencesLocked(uri)
 	ix.recordMemberLinksLocked(uri, nil)
+	delete(ix.byURI, uri)
 	delete(ix.dependsOn, uri)
 	delete(ix.errByURI, uri)
 	delete(ix.importsByURI, uri)
 	delete(ix.connectionsByURI, uri)
+	return cleared
 }
 
 // removeDeclarationsLocked drops uri's declaration entries only, leaving
@@ -574,7 +667,8 @@ func (ix *Index) HoverInfo(uri string, line, character int, word, qualifier stri
 	if !ok || len(refs) == 0 {
 		return Declaration{}, false
 	}
-	return ix.byURI[refs[0].uri][refs[0].idx], true
+	ref := ix.primaryRefLocked(refs)
+	return ix.byURI[ref.uri][ref.idx], true
 }
 
 // preferGloballyLocked checks whether every location in locs already has
@@ -605,6 +699,64 @@ func (ix *Index) preferGloballyLocked(word string, locs []Location, wantPrototyp
 		return nil, false
 	}
 	return out, true
+}
+
+// isContainerKind reports whether d is a module/interface/program, the
+// three kinds that carry a port and parameter list.
+func isContainerKind(d Declaration) bool {
+	return d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram
+}
+
+// firstDeclLocked returns the deterministically-first declaration named
+// name that keep accepts -- lowest (URI, line, character), not whichever
+// the scan happened to index first. Shared by every "look this name up and
+// take one" accessor (Ports, Params, Typedef, structTypedefLocked), which
+// each used to stop at byName's first match and so answered differently
+// depending on the order files were indexed in. See primaryRefLocked.
+func (ix *Index) firstDeclLocked(name string, keep func(Declaration) bool) (declRef, Declaration, bool) {
+	var matches []declRef
+	for _, r := range ix.byName[name] {
+		if keep(ix.byURI[r.uri][r.idx]) {
+			matches = append(matches, r)
+		}
+	}
+	if len(matches) == 0 {
+		return declRef{}, Declaration{}, false
+	}
+	ref := ix.primaryRefLocked(matches)
+	return ref, ix.byURI[ref.uri][ref.idx], true
+}
+
+// primaryRefLocked picks the one declaration a single-answer query should
+// report, deterministically: lowest (URI, line, character) rather than
+// whichever happened to be indexed first.
+//
+// refs order comes from byName, which is append order across SetFile
+// calls, and the indexing worker pool runs those in nondeterministic file
+// order. So with two packages each declaring cfg_t, hover showed one
+// today and the other after a restart, with no source change. Same
+// ordering discipline WorkspaceSymbols already applies for the same
+// reason -- see its topK comparator.
+func (ix *Index) primaryRefLocked(refs []declRef) declRef {
+	best := refs[0]
+	bestDecl := ix.byURI[best.uri][best.idx]
+	for _, r := range refs[1:] {
+		d := ix.byURI[r.uri][r.idx]
+		switch {
+		case r.uri != best.uri:
+			if r.uri > best.uri {
+				continue
+			}
+		case d.Line != bestDecl.Line:
+			if d.Line > bestDecl.Line {
+				continue
+			}
+		case d.Character >= bestDecl.Character:
+			continue
+		}
+		best, bestDecl = r, d
+	}
+	return best
 }
 
 // resolveRefsLocked is the shared scope-aware resolution used by
@@ -849,13 +1001,8 @@ func (ix *Index) lookupInIncludesRefsLocked(uri, word string) ([]declRef, bool) 
 func (ix *Index) Ports(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	for _, r := range ix.byName[name] {
-		d := ix.byURI[r.uri][r.idx]
-		if d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram {
-			return d.Ports, true
-		}
-	}
-	return nil, false
+	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
+	return d.Ports, ok
 }
 
 // Params returns the overridable ("parameter", not "localparam") entries
@@ -866,13 +1013,8 @@ func (ix *Index) Ports(name string) ([]Port, bool) {
 func (ix *Index) Params(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	for _, r := range ix.byName[name] {
-		d := ix.byURI[r.uri][r.idx]
-		if d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram {
-			return d.Params, true
-		}
-	}
-	return nil, false
+	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
+	return d.Params, ok
 }
 
 // StructFields returns the field list of a struct or union typedef named
@@ -897,17 +1039,13 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 // look up instead (see Declaration.Fields, which reuses Port's
 // name-and-detail shape and carries no position).
 func (ix *Index) structTypedefLocked(typeName string) (declRef, []Port, bool) {
-	for _, r := range ix.byName[typeName] {
-		d := ix.byURI[r.uri][r.idx]
-		if d.Kind != KindTypedef {
-			continue
-		}
-		switch d.TypedefKind {
-		case "struct", "union":
-			return r, d.Fields, true
-		}
+	ref, d, ok := ix.firstDeclLocked(typeName, func(d Declaration) bool {
+		return d.Kind == KindTypedef && (d.TypedefKind == "struct" || d.TypedefKind == "union")
+	})
+	if !ok {
+		return declRef{}, nil, false
 	}
-	return declRef{}, nil, false
+	return ref, d.Fields, true
 }
 
 // ScopedOccurrencesForStructField returns every occurrence of field that is
@@ -997,7 +1135,8 @@ func (ix *Index) receiverTypeNameLocked(uri string, line, character int, receive
 	if !ok || len(refs) == 0 {
 		return "", false
 	}
-	if d := ix.byURI[refs[0].uri][refs[0].idx]; d.TypeName != "" {
+	ref := ix.primaryRefLocked(refs)
+	if d := ix.byURI[ref.uri][ref.idx]; d.TypeName != "" {
 		return d.TypeName, true
 	}
 	return "", false
@@ -1013,13 +1152,8 @@ func (ix *Index) receiverTypeNameLocked(uri string, line, character int, receive
 func (ix *Index) Typedef(name string) (Declaration, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	for _, r := range ix.byName[name] {
-		d := ix.byURI[r.uri][r.idx]
-		if d.Kind == KindTypedef {
-			return d, true
-		}
-	}
-	return Declaration{}, false
+	_, d, ok := ix.firstDeclLocked(name, func(d Declaration) bool { return d.Kind == KindTypedef })
+	return d, ok
 }
 
 // Occurrences returns every identifier occurrence of name across the
@@ -1101,21 +1235,22 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 		return ix.occurrencesLocked(word)
 	}
 
-	d := ix.byURI[refs[0].uri][refs[0].idx]
-	container, restrict := ix.containerScopeLocked(refs[0].uri, d)
+	ref := ix.primaryRefLocked(refs)
+	d := ix.byURI[ref.uri][ref.idx]
+	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
 		return ix.occurrencesLocked(word)
 	}
 
 	var out []Location
-	for _, occ := range ix.occByName[word][refs[0].uri] {
+	for _, occ := range ix.occByName[word][ref.uri] {
 		if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
 			continue
 		}
-		out = append(out, Location{URI: refs[0].uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character})
 	}
 	if d.Kind == KindPort || d.Kind == KindParameter {
-		out = append(out, ix.connectionOccurrencesLocked(refs[0].uri, d.Parent, word, d.Kind)...)
+		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, word, d.Kind)...)
 	}
 	return out
 }
@@ -1233,7 +1368,8 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 		if len(refs) == 0 {
 			continue
 		}
-		d := ix.byURI[refs[0].uri][refs[0].idx]
+		ref := ix.primaryRefLocked(refs)
+		d := ix.byURI[ref.uri][ref.idx]
 		top.push(Symbol{Name: name, Kind: d.Kind})
 	}
 	return top.sorted()
@@ -1389,8 +1525,7 @@ func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, b
 func (ix *Index) lookupInstantiationPortRefsLocked(moduleName, portName string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[moduleName] {
-		qd := ix.byURI[qref.uri][qref.idx]
-		if qd.Kind != KindModule && qd.Kind != KindInterface && qd.Kind != KindProgram {
+		if !isContainerKind(ix.byURI[qref.uri][qref.idx]) {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, portName)...)
@@ -1434,7 +1569,8 @@ func (ix *Index) InstantiationPortInfo(moduleName, portName string) (Declaration
 	if !ok {
 		return Declaration{}, false
 	}
-	return ix.byURI[refs[0].uri][refs[0].idx], true
+	ref := ix.primaryRefLocked(refs)
+	return ix.byURI[ref.uri][ref.idx], true
 }
 
 // lookupSelfRefLocked reports whether (line, character) falls directly

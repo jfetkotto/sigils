@@ -1361,3 +1361,81 @@ func TestTextDocumentDefinitionResolvesAPortDeclaredWithANetType(t *testing.T) {
 		t.Fatalf("goto-definition on .requestBuff_a = %+v", locs)
 	}
 }
+
+// A client opens plenty of documents that aren't files on disk -- VS
+// Code's diff view uses "git:", an unsaved buffer is "untitled:". Those
+// belong in the document store but not in the workspace index: indexing
+// one puts a second copy of every declaration under a URI nothing resolves
+// back to a path, so goto-definition offers both and rename emits an edit
+// into a document the client may not let the user write.
+func TestNonFileDocumentsStayOutOfTheIndex(t *testing.T) {
+	for _, uri := range []string{
+		`git:/repo/top.sv?{"ref":"HEAD"}`,
+		"untitled:Untitled-1",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			s := newTestServer()
+			openDoc(t, s, uri, "module ghost_module;\nendmodule\n")
+
+			if _, ok := s.Index().Lookup("ghost_module"); ok {
+				t.Fatalf("%s was indexed", uri)
+			}
+			// It must still be readable, so hover and completion work.
+			if _, ok := s.textForURI(uri); !ok {
+				t.Fatalf("%s should still be in the document store", uri)
+			}
+		})
+	}
+}
+
+func TestFileDocumentsAreStillIndexed(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///top.sv", "module real_module;\nendmodule\n")
+	if _, ok := s.Index().Lookup("real_module"); !ok {
+		t.Fatalf("a file:// document should be indexed")
+	}
+}
+
+// glsp gates only non-initialize methods before initialization, so a
+// client that re-handshakes lands in Initialize twice. The first indexing
+// pass and its fsnotify watcher used to leak for the life of the process,
+// because Shutdown can only ever cancel the newest.
+func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
+	root := t.TempDir()
+	s := newTestServer()
+	params := &protocol.InitializeParams{
+		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: protocol.DocumentUri("file://" + root), Name: "root"}},
+	}
+
+	if _, err := s.Initialize(nil, params); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for the first pass's cancel func so its invocation is
+	// observable; the real one has already been installed by the call
+	// above and cancelling it here changes nothing else.
+	cancelled := make(chan struct{})
+	s.mu.Lock()
+	realFirst := s.watchCancel
+	s.watchCancel = func() { close(cancelled) }
+	s.mu.Unlock()
+	defer realFirst()
+
+	if _, err := s.Initialize(nil, params); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("the second initialize did not cancel the first indexing pass")
+	}
+
+	s.mu.Lock()
+	second := s.watchCancel
+	s.mu.Unlock()
+	if second == nil {
+		t.Fatal("expected the second initialize to install its own cancel func")
+	}
+	second()
+}

@@ -127,7 +127,7 @@ func TestWatchFilesPublishesDiagnosticsForReindexedFile(t *testing.T) {
 func TestWatchFilesSkipsReindexingOpenDocuments(t *testing.T) {
 	// Shorten the debounce so the 300ms settle below reaches past it --
 	// otherwise the assertion would pass trivially without ever exercising
-	// the open-document skip in reindexFromDisk.
+	// the open-document skip in syncFromDisk.
 	old := watchDebounce
 	watchDebounce = 50 * time.Millisecond
 	t.Cleanup(func() { watchDebounce = old })
@@ -399,4 +399,85 @@ func waitForWatch(t *testing.T, done <-chan bool) {
 	case <-time.After(2 * time.Second):
 		t.Fatalf("watchFiles did not return promptly after context cancellation")
 	}
+}
+
+// Remove and Rename used to be filtered out of the event loop entirely, so
+// the only path that dropped an index entry was a filelist change. A
+// branch switch that deletes a source file usually leaves the filelist
+// alone, and the file's declarations stayed resolvable indefinitely.
+func TestWatchFilesDropsARemovedSourceFile(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "leaf.sv")
+	writeFileT(t, srcPath, "module doomed;\nendmodule\n")
+	resolved := evalSymT(t, srcPath)
+
+	s := newTestServer()
+	s.index.SetFile(pathToURI(srcPath), "module doomed;\nendmodule\n")
+	if _, ok := s.Index().Lookup("doomed"); !ok {
+		t.Fatalf("expected doomed to be indexed to begin with")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runWatchFiles(s, ctx, []workspace.SourceFile{{LogicalPath: srcPath, ResolvedPath: resolved}}, nil)
+
+	if err := os.Remove(srcPath); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := s.Index().Lookup("doomed"); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("file watcher did not drop the removed file in time")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	cancel()
+	waitForWatch(t, done)
+}
+
+// An editor's atomic save is a rename, so Rename(x) is routinely followed
+// by Create(x) inside one debounce window. The file is still there when
+// the batch drains, and must be rescanned rather than dropped.
+func TestWatchFilesTreatsRenameBasedSaveAsAChangeNotARemoval(t *testing.T) {
+	dir := t.TempDir()
+	srcPath := filepath.Join(dir, "leaf.sv")
+	writeFileT(t, srcPath, "module old_name;\nendmodule\n")
+	resolved := evalSymT(t, srcPath)
+
+	s := newTestServer()
+	s.index.SetFile(pathToURI(srcPath), "module old_name;\nendmodule\n")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := runWatchFiles(s, ctx, []workspace.SourceFile{{LogicalPath: srcPath, ResolvedPath: resolved}}, nil)
+
+	// Write to a sibling then rename over the target: exactly what an
+	// atomic save does.
+	tmpPath := filepath.Join(dir, "leaf.sv.tmp")
+	writeFileT(t, tmpPath, "module new_name;\nendmodule\n")
+	if err := os.Rename(tmpPath, srcPath); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if _, ok := s.Index().Lookup("new_name"); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("file watcher did not pick up the rename-based save in time")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if _, ok := s.Index().Lookup("old_name"); ok {
+		t.Fatalf("old_name should have been replaced, not kept alongside")
+	}
+
+	cancel()
+	waitForWatch(t, done)
 }

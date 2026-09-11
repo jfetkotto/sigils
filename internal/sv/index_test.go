@@ -2,6 +2,7 @@ package sv
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1896,5 +1897,99 @@ func TestScopedOccurrencesForStructFieldDeclinesWhenReceiverIsNotAStruct(t *test
 	// So does a name that isn't a field of the receiver's struct.
 	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "st_FromClock", "", false, "notAField"); ok {
 		t.Fatalf("expected the struct-field path to decline for a non-member name")
+	}
+}
+
+// Deleting an `include line must retract what that header contributed. It
+// used to keep both its declarations and its diagnostics indefinitely, and
+// stay out of touchedURIs so the server never republished to clear them.
+func TestSetFileRetractsAnIncludeThatIsNoLongerThere(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\nbroken syntax here ;\n"}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"defs.svh\"\nmodule top;\nendmodule\n")
+
+	if _, ok := ix.Lookup("bus_t"); !ok {
+		t.Fatalf("expected bus_t to be indexed while the include is present")
+	}
+	if len(ix.Diagnostics("file:///defs.svh")) == 0 {
+		t.Fatalf("expected the header's own diagnostics to be recorded")
+	}
+
+	touched := ix.SetFile("file:///top.sv", "module top;\nendmodule\n")
+
+	if _, ok := ix.Lookup("bus_t"); ok {
+		t.Fatalf("bus_t still resolves after its header stopped being included")
+	}
+	if diags := ix.Diagnostics("file:///defs.svh"); len(diags) != 0 {
+		t.Fatalf("stale diagnostics survived on the dropped header: %+v", diags)
+	}
+	if !slices.Contains(touched, "file:///defs.svh") {
+		t.Fatalf("the dropped header must be touched so the server republishes it, got %v", touched)
+	}
+}
+
+// A header two files include must survive one of them dropping it.
+func TestSetFileKeepsAnIncludeAnotherFileStillHas(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"}}
+	})
+	ix.SetFile("file:///a.sv", "`include \"defs.svh\"\nmodule a;\nendmodule\n")
+	ix.SetFile("file:///b.sv", "`include \"defs.svh\"\nmodule b;\nendmodule\n")
+
+	ix.SetFile("file:///a.sv", "module a;\nendmodule\n")
+
+	if _, ok := ix.Lookup("bus_t"); !ok {
+		t.Fatalf("bus_t was dropped even though b.sv still includes its header")
+	}
+}
+
+func TestRemoveFileRetractsHeadersOnlyItReached(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"defs.svh\"\nmodule top;\nendmodule\n")
+
+	cleared := ix.RemoveFile("file:///top.sv")
+
+	if _, ok := ix.Lookup("bus_t"); ok {
+		t.Fatalf("bus_t still resolves after its only includer was removed")
+	}
+	if !slices.Contains(cleared, "file:///defs.svh") || !slices.Contains(cleared, "file:///top.sv") {
+		t.Fatalf("expected both URIs reported for republishing, got %v", cleared)
+	}
+}
+
+// Which of two same-named declarations a single-answer query reports must
+// not depend on the order the files happened to be indexed in -- the
+// indexing worker pool runs SetFile across files nondeterministically, so
+// scan order made hover's answer drift between restarts.
+func TestHoverInfoPicksTheSameDeclarationRegardlessOfIndexOrder(t *testing.T) {
+	const (
+		aSrc   = "package pkg_a;\n  typedef logic [7:0] cfg_t;\nendpackage\n"
+		bSrc   = "package pkg_b;\n  typedef logic [15:0] cfg_t;\nendpackage\n"
+		useSrc = "module top;\n  cfg_t data;\nendmodule\n"
+	)
+
+	forward := NewIndex()
+	forward.SetFile("file:///a.sv", aSrc)
+	forward.SetFile("file:///b.sv", bSrc)
+	forward.SetFile("file:///use.sv", useSrc)
+
+	reverse := NewIndex()
+	reverse.SetFile("file:///b.sv", bSrc)
+	reverse.SetFile("file:///a.sv", aSrc)
+	reverse.SetFile("file:///use.sv", useSrc)
+
+	got1, ok1 := forward.Typedef("cfg_t")
+	got2, ok2 := reverse.Typedef("cfg_t")
+	if !ok1 || !ok2 {
+		t.Fatalf("expected cfg_t to resolve in both orders (%v, %v)", ok1, ok2)
+	}
+	if got1.Line != got2.Line || got1.AliasType != got2.AliasType {
+		t.Fatalf("index order changed the answer: %+v vs %+v", got1, got2)
 	}
 }
