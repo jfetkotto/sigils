@@ -255,3 +255,60 @@ func InstantiationParamNameIn(toks Tokens, line int, word string, wordStart int)
 	}
 	return moduleName, true
 }
+
+// IncludePathIn returns the path written on the `include directive whose own
+// token, or whose following string-literal argument, contains (line,
+// character) -- unquoted, exactly as the source spells it.
+//
+// inDirective reports whether the cursor is on such a directive at all,
+// separately from whether a path came back, so the caller can decline to fall
+// through to ordinary identifier resolution when it is. That separation
+// matters: WordAt is deliberately string- and comment-unaware (see its doc
+// comment), so inside `include "pa_cfg.svh" it happily returns "pa_cfg" and
+// resolves it to an unrelated module of that name. A cursor there has a real
+// answer or none.
+//
+// ok is false with inDirective true when the directive's argument isn't a
+// plain string literal: an `include `PATH_MACRO, which svparse's preprocessor
+// doesn't expand (a documented limitation), or the angle-bracket form.
+//
+// Located by token span, not by line alone, so more than one directive on a
+// line stays correct.
+func IncludePathIn(toks Tokens, line, character int) (path string, inDirective, ok bool) {
+	for i, t := range toks {
+		if t.Kind != svtoken.KindDirective || t.Text != "include" || t.Line != line {
+			continue
+		}
+		// The directive token's Character is the '`' column, while its Text
+		// excludes the backtick (see svparse's lexer) -- hence the +1.
+		if spans(character, t.Character, t.Character+1+UTF16Len(t.Text)) {
+			return includeArg(toks, i)
+		}
+		if i+1 < len(toks) {
+			if a := toks[i+1]; a.Line == line && spans(character, a.Character, a.Character+UTF16Len(a.Text)) {
+				return includeArg(toks, i)
+			}
+		}
+	}
+	return "", false, false
+}
+
+// includeArg unquotes the string literal following the `include directive at
+// index i, if that's what follows it at all.
+func includeArg(toks Tokens, i int) (path string, inDirective, ok bool) {
+	if i+1 >= len(toks) || toks[i+1].Kind != svtoken.KindStringLiteral {
+		return "", true, false
+	}
+	text := toks[i+1].Text
+	if len(text) < 2 || text[0] != '"' || text[len(text)-1] != '"' {
+		return "", true, false
+	}
+	return text[1 : len(text)-1], true, true
+}
+
+// spans reports whether character falls within [start, end], end inclusive so
+// a cursor resting just past a token still counts as being on it -- the same
+// courtesy WordAt extends at a word's trailing edge.
+func spans(character, start, end int) bool {
+	return character >= start && character <= end
+}

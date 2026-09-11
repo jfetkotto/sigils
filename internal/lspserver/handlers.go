@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/tliron/glsp"
 	protocol "github.com/tliron/glsp/protocol_3_16"
@@ -215,8 +216,17 @@ func (s *Server) TextDocumentDeclaration(context *glsp.Context, params *protocol
 // via resolve (either sv.Index.FindDefinition or FindDeclaration -- both
 // share this exact signature), formatting the result as LSP locations.
 //
+// An `include directive's path is checked first: it's the one place in a
+// SystemVerilog file where the source text really is a file reference, and
+// the resolved target is already recorded in the index (see
+// sv.Index.IncludesOf) -- often reachable no other way, since the path may
+// resolve through a filelist's "+incdir+" rather than relative to the
+// including file. A cursor there never falls through to name resolution,
+// which would otherwise answer "`include \"pa_cfg.svh\"" with an unrelated
+// module named pa_cfg (see sv.IncludePathIn).
+//
 // A named port connection's port name (".clk(" at an instantiation site)
-// or a parameter override's name (".WIDTH(") is checked first, mirroring
+// or a parameter override's name (".WIDTH(") is checked next, mirroring
 // TextDocumentCompletion's own precedence -- neither has a scope-chain
 // link to the instantiated module at all (see
 // sv.Index.FindInstantiationPort's doc comment), so resolve would never
@@ -232,12 +242,20 @@ func (s *Server) resolveWordAt(
 	}
 	line, character := int(position.Line), int(position.Character)
 
+	toks := sv.Lex(text) // lexed once, shared by every probe below -- see sv.Tokens
+
+	if path, inDirective, ok := sv.IncludePathIn(toks, line, character); inDirective {
+		if !ok {
+			return nil, nil
+		}
+		return includeLocations(s.index.IncludesOf(uri), path), nil
+	}
+
 	word, start, ok := sv.WordAt(text, line, character)
 	if !ok {
 		return nil, nil
 	}
 
-	toks := sv.Lex(text) // lexed once, shared by both probes below -- see sv.Tokens
 	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		if locs, ok := s.index.FindInstantiationPort(moduleName, word); ok {
 			return formatLocations(locs, word), nil
@@ -256,6 +274,31 @@ func (s *Server) resolveWordAt(
 		return nil, nil
 	}
 	return formatLocations(locs, word), nil
+}
+
+// includeLocations matches an `include's written path against the URIs the
+// file's last scan actually resolved its includes to, by path suffix, and
+// points at the start of each match.
+//
+// Reusing the recorded resolution rather than resolving the path again means
+// no filesystem access, and guarantees goto-definition lands on the same file
+// the index really read. More than one match (the same basename included from
+// two directories) is a fine answer -- LSP takes a list. An include that never
+// resolved, because it sits in an `ifdef-excluded region or because the file
+// is missing, simply has no entry, and its unresolved-include diagnostic
+// already tells the user why.
+func includeLocations(resolved []string, path string) []protocol.Location {
+	path = strings.TrimPrefix(path, "./")
+	if path == "" {
+		return nil
+	}
+	var out []protocol.Location
+	for _, uri := range resolved {
+		if uri == path || strings.HasSuffix(uri, "/"+path) {
+			out = append(out, protocol.Location{URI: protocol.DocumentUri(uri)})
+		}
+	}
+	return out
 }
 
 func formatLocations(locs []sv.Location, word string) []protocol.Location {

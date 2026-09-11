@@ -1218,3 +1218,130 @@ func TestTextDocumentCompletionSuggestsStructMembersForIncludedPackageType(t *te
 		t.Fatalf("expected [unique_field, flag], got [%s, %s]", items[0].Label, items[1].Label)
 	}
 }
+
+// testIncludeResolver is the lspserver-side counterpart of internal/sv's own
+// stub: it resolves a fixed set of include paths without touching disk.
+type testIncludeResolver struct {
+	files    map[string]string // path as written -> text
+	resolved []string
+}
+
+func (r *testIncludeResolver) Resolve(includedPath, fromFile string) (text, resolvedPath string, err error) {
+	t, ok := r.files[includedPath]
+	if !ok {
+		return "", "", fmt.Errorf("testIncludeResolver: %q not found", includedPath)
+	}
+	uri := "file:///inc/" + includedPath
+	r.resolved = append(r.resolved, uri)
+	return t, uri, nil
+}
+
+func (r *testIncludeResolver) Resolved() []string { return append([]string(nil), r.resolved...) }
+
+func serverWithIncludes(t *testing.T, files map[string]string) *Server {
+	t.Helper()
+	s := newTestServer()
+	s.index.SetIncludeResolverFactory(func() sv.IncludeResolver {
+		return &testIncludeResolver{files: files}
+	})
+	return s
+}
+
+func openDoc(t *testing.T, s *Server, uri, text string) {
+	t.Helper()
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{
+			URI: protocol.DocumentUri(uri), LanguageID: "systemverilog", Version: 1, Text: text,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func definitionAt(t *testing.T, s *Server, uri string, line, character int) []protocol.Location {
+	t.Helper()
+	got, err := s.TextDocumentDefinition(nil, &protocol.DefinitionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri(uri)},
+			Position:     protocol.Position{Line: uint32(line), Character: uint32(character)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		return nil
+	}
+	locs, ok := got.([]protocol.Location)
+	if !ok {
+		t.Fatalf("unexpected definition result type %T", got)
+	}
+	return locs
+}
+
+func TestTextDocumentDefinitionOnIncludePathJumpsToTheResolvedFile(t *testing.T) {
+	s := serverWithIncludes(t, map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"})
+	openDoc(t, s, "file:///top.sv", "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	for name, character := range map[string]int{"basename": 11, "extension": 16, "directive": 3} {
+		t.Run(name, func(t *testing.T) {
+			locs := definitionAt(t, s, "file:///top.sv", 0, character)
+			if len(locs) != 1 {
+				t.Fatalf("expected 1 location, got %+v", locs)
+			}
+			if locs[0].URI != "file:///inc/defs.svh" {
+				t.Fatalf("unexpected URI: %+v", locs[0])
+			}
+			if locs[0].Range.Start.Line != 0 || locs[0].Range.Start.Character != 0 {
+				t.Fatalf("expected the start of the file, got %+v", locs[0].Range)
+			}
+		})
+	}
+}
+
+func TestTextDocumentDefinitionOnIncludePathDoesNotJumpToASameNamedModule(t *testing.T) {
+	// The reported wrong answer: resolving the path as an identifier lands on
+	// an unrelated module that happens to share the basename.
+	s := serverWithIncludes(t, map[string]string{"pa_cfg.svh": "typedef logic cfg_t;\n"})
+	openDoc(t, s, "file:///other.sv", "module pa_cfg;\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "package pa_top;\n`include \"pa_cfg.svh\"\nendpackage\n")
+
+	locs := definitionAt(t, s, "file:///top.sv", 1, 12)
+	for _, l := range locs {
+		if l.URI == "file:///other.sv" {
+			t.Fatalf("goto-definition jumped to the unrelated module: %+v", locs)
+		}
+	}
+	if len(locs) != 1 || locs[0].URI != "file:///inc/pa_cfg.svh" {
+		t.Fatalf("expected the included header, got %+v", locs)
+	}
+}
+
+func TestTextDocumentDefinitionOnUnresolvedIncludePathReturnsNothing(t *testing.T) {
+	s := serverWithIncludes(t, nil)
+	openDoc(t, s, "file:///top.sv", "`include \"missing.svh\"\nmodule top; endmodule\n")
+
+	if locs := definitionAt(t, s, "file:///top.sv", 0, 11); len(locs) != 0 {
+		t.Fatalf("expected no location for an unresolved include, got %+v", locs)
+	}
+}
+
+func TestTextDocumentDefinitionOnMacroBuiltIncludePathReturnsNothing(t *testing.T) {
+	s := serverWithIncludes(t, nil)
+	openDoc(t, s, "file:///other.sv", "module PATH_MACRO;\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "`include `PATH_MACRO\nmodule top; endmodule\n")
+
+	if locs := definitionAt(t, s, "file:///top.sv", 0, 3); len(locs) != 0 {
+		t.Fatalf("expected no location for a macro-built include path, got %+v", locs)
+	}
+}
+
+func TestTextDocumentDefinitionStillResolvesIdentifiersInAFileWithIncludes(t *testing.T) {
+	s := serverWithIncludes(t, map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"})
+	openDoc(t, s, "file:///top.sv", "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///top.sv", 2, 4)
+	if len(locs) != 1 || locs[0].URI != "file:///inc/defs.svh" {
+		t.Fatalf("expected bus_t to still resolve, got %+v", locs)
+	}
+}
