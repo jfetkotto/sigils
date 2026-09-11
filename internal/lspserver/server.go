@@ -43,13 +43,19 @@ type Server struct {
 	// worker pool, watch.go's cascade) well after Initialize itself
 	// returns. nil until Initialize runs.
 	notify glsp.NotifyFunc
+
+	// published records, per URI, a digest of the diagnostics last sent to
+	// the client, so an unchanged list isn't sent again. See
+	// publishDiagnostics.
+	published map[string]string
 }
 
 func NewServer(log commonlog.Logger) *Server {
 	return &Server{
-		Log:   log,
-		docs:  document.NewStore(),
-		index: sv.NewIndex(),
+		Log:       log,
+		docs:      document.NewStore(),
+		index:     sv.NewIndex(),
+		published: make(map[string]string),
 	}
 }
 
