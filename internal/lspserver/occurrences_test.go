@@ -19,7 +19,7 @@ func scopedOccurrencesAt(t *testing.T, s *Server, uri string, line, character, s
 	if !ok {
 		t.Fatalf("no text available for %s", uri)
 	}
-	return s.scopedOccurrences(sv.Lex(text), uri, line, character, start, word, qualifier, hasQualifier)
+	return s.scopedOccurrences(sv.Lex(text), text, uri, line, character, start, word, qualifier, hasQualifier)
 }
 
 func TestScopedOccurrencesSameFile(t *testing.T) {

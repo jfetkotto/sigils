@@ -1836,3 +1836,65 @@ func BenchmarkWorkspaceSymbolsEmptyQuery(b *testing.B) {
 		ix.WorkspaceSymbols("", 500)
 	}
 }
+
+// The reported collision: a struct field whose name is also an unrelated
+// module's port. Before ScopedOccurrencesForStructField the field query
+// resolved to nothing and fell back to the unscoped, name-wide list, so
+// find-references on it crossed into a module with no relation to the
+// receiver's type at all.
+func structFieldCollisionIndex(t *testing.T) *Index {
+	t.Helper()
+	ix := NewIndex()
+	ix.SetFile("file:///pkg_types.sv", "package pkg_types;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n")
+	ix.SetFile("file:///consumer.sv", "module mod_consumer (\n  input pkg_types::ty_bundle st_FromClock\n);\n  logic result;\n  assign result = st_FromClock.ckSideband[0];\nendmodule\n")
+	ix.SetFile("file:///unrelated.sv", "module mod_unrelated (\n  input logic [3:0] ckSideband\n);\nendmodule\n")
+	ix.SetFile("file:///wrapper.sv", "module mod_unrelated_wrapper;\n  logic [3:0] sig;\n  mod_unrelated u_unrelated (.ckSideband(sig));\nendmodule\n")
+	return ix
+}
+
+func TestScopedOccurrencesForStructFieldExcludesUnrelatedSameNamedPort(t *testing.T) {
+	ix := structFieldCollisionIndex(t)
+
+	// Cursor on "ckSideband" in "st_FromClock.ckSideband", consumer.sv line 4.
+	locs, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "st_FromClock", "", false, "ckSideband")
+	if !ok {
+		t.Fatalf("expected the struct-field path to apply")
+	}
+	for _, l := range locs {
+		if l.URI == "file:///unrelated.sv" || l.URI == "file:///wrapper.sv" {
+			t.Fatalf("unrelated occurrence leaked into the result: %+v (all: %+v)", l, locs)
+		}
+	}
+	var sawAccess, sawDecl bool
+	for _, l := range locs {
+		switch l.URI {
+		case "file:///consumer.sv":
+			sawAccess = true
+		case "file:///pkg_types.sv":
+			sawDecl = true
+		}
+	}
+	if !sawAccess {
+		t.Fatalf("expected the field access itself, got %+v", locs)
+	}
+	if !sawDecl {
+		t.Fatalf("expected the field's own declaration inside the typedef, got %+v", locs)
+	}
+}
+
+func TestScopedOccurrencesForStructFieldDeclinesWhenReceiverIsNotAStruct(t *testing.T) {
+	ix := structFieldCollisionIndex(t)
+
+	// "result" is a plain logic, not a struct -- the caller must fall back.
+	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "result", "", false, "ckSideband"); ok {
+		t.Fatalf("expected the struct-field path to decline for a non-struct receiver")
+	}
+	// An unresolvable receiver declines too.
+	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "no_such_signal", "", false, "ckSideband"); ok {
+		t.Fatalf("expected the struct-field path to decline for an unresolved receiver")
+	}
+	// So does a name that isn't a field of the receiver's struct.
+	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "st_FromClock", "", false, "notAField"); ok {
+		t.Fatalf("expected the struct-field path to decline for a non-member name")
+	}
+}

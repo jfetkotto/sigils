@@ -33,18 +33,34 @@ import (
 // unions in every matching connection site for that case (see its doc
 // comment), so both directions resolve to the same result set.
 //
+// A struct/union field access ("st_bundle.ckSideband") is checked next, via
+// sv.Index.ScopedOccurrencesForStructField -- the receiver-type resolution
+// hover (structFieldHover) and completion (structMemberCompletionItems)
+// already do, now on the references/rename side too. Without it a field name
+// resolves to no declaration at all, and sv.Index.ScopedOccurrences falls
+// back to its unscoped, name-wide list: every identically-spelled identifier
+// in the workspace, including unrelated modules' ports and the named-port
+// connections to them. That fallback stays for names that genuinely can't be
+// resolved; a field access only looked unresolvable.
+//
 // toks is the caller's already-lexed document (see sv.Tokens). Taking it as
 // a parameter rather than re-deriving it here matters twice over: every
 // caller already holds the text, so re-fetching it meant a second
 // os.ReadFile of the same file per request for any document not open in the
 // editor, and both probes below would otherwise lex the whole file
 // separately.
-func (s *Server) scopedOccurrences(toks sv.Tokens, uri string, line, character, start int, word, qualifier string, hasQualifier bool) []protocol.Location {
+func (s *Server) scopedOccurrences(toks sv.Tokens, text, uri string, line, character, start int, word, qualifier string, hasQualifier bool) []protocol.Location {
 	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		return formatLocations(s.index.ScopedOccurrencesForInstantiationConnection(moduleName, word), word)
 	}
 	if moduleName, ok := sv.InstantiationParamNameIn(toks, line, word, start); ok {
 		return formatLocations(s.index.ScopedOccurrencesForInstantiationConnection(moduleName, word), word)
+	}
+	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
+		recvQualifier, recvHasQualifier := sv.QualifierAt(text, line, receiverStart)
+		if locs, ok := s.index.ScopedOccurrencesForStructField(uri, line, character, receiver, recvQualifier, recvHasQualifier, word); ok {
+			return formatLocations(locs, word)
+		}
 	}
 	return formatLocations(s.index.ScopedOccurrences(uri, line, character, word, qualifier, hasQualifier), word)
 }
