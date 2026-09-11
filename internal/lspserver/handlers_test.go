@@ -1345,3 +1345,19 @@ func TestTextDocumentDefinitionStillResolvesIdentifiersInAFileWithIncludes(t *te
 		t.Fatalf("expected bus_t to still resolve, got %+v", locs)
 	}
 }
+
+// A port declared "direction net_type data_type name" (LRM 23.2.2.3) used
+// to be dropped from svparse's port list entirely, so it had no Declaration
+// here and every feature keyed off it silently returned nothing at each
+// instantiation site. Fixed in svparse v0.1.5; pinned here because the
+// symptom only ever surfaced downstream, in a different file from the cause.
+func TestTextDocumentDefinitionResolvesAPortDeclaredWithANetType(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///leaf.sv", "module leaf(\n  input  wire  logic       clk,\n  input  wire  logic [3:0] requestBuff_a\n);\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "module top;\n  logic [3:0] sig;\n  leaf u_leaf (.requestBuff_a(sig));\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///top.sv", 2, 20)
+	if len(locs) != 1 || locs[0].URI != "file:///leaf.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("goto-definition on .requestBuff_a = %+v", locs)
+	}
+}
