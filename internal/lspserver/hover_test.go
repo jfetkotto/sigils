@@ -47,6 +47,44 @@ func TestTextDocumentHoverModule(t *testing.T) {
 	}
 }
 
+func TestTextDocumentHoverInstanceNameFromUsageSite(t *testing.T) {
+	s := newTestServer()
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{
+			URI: "file:///leaf.sv", LanguageID: "systemverilog", Version: 1,
+			Text: "module leaf;\nendmodule\n",
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	topText := "module top;\n  leaf u_leaf();\n  logic x;\n  assign x = u_leaf.y;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///top.sv", LanguageID: "systemverilog", Version: 1, Text: topText},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Line 3 ("  assign x = u_leaf.y;") is a usage site, not the
+	// declaration itself (line 1) -- hover must resolve back to the
+	// instance's own Declaration and show it's an instance of leaf.
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///top.sv"},
+			Position:     protocol.Position{Line: 3, Character: 15},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result for u_leaf at its usage site")
+	}
+	content, ok := hover.Contents.(protocol.MarkupContent)
+	if !ok || !strings.Contains(content.Value, "leaf u_leaf") {
+		t.Fatalf("expected hover text to show u_leaf as an instance of leaf, got %#v", hover.Contents)
+	}
+}
+
 func TestTextDocumentHoverModuleTruncatesPortListBeyondTen(t *testing.T) {
 	s := newTestServer()
 	var ports strings.Builder

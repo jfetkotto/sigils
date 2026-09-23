@@ -386,6 +386,36 @@ func TestFindDefinitionUnqualifiedModuleFallsBackAcrossFiles(t *testing.T) {
 	}
 }
 
+func TestFindDefinitionResolvesModuleInstanceNameFromUsageSite(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module leaf;\nendmodule\n\nmodule top;\n  leaf u_leaf();\n  logic x;\n  assign x = u_leaf.y;\nendmodule\n")
+
+	// Line 4 ("  leaf u_leaf();") is where the instance itself is declared;
+	// line 6 ("  assign x = u_leaf.y;") is a later usage site with no
+	// declaration of its own -- it must resolve back to the instance's
+	// name in the instantiation statement.
+	locs, ok := ix.FindDefinition("file:///a.sv", 6, 15, "u_leaf", "", false)
+	if !ok || len(locs) != 1 {
+		t.Fatalf("FindDefinition(u_leaf) = %+v, %v; want exactly one match", locs, ok)
+	}
+	if locs[0].Line != 4 || locs[0].Kind != KindVariable {
+		t.Fatalf("expected u_leaf's declaration at line 4 (KindVariable), got %+v", locs[0])
+	}
+}
+
+func TestFindDefinitionResolvesInterfaceInstanceNameFromUsageSite(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface leaf_if ();\n  logic [3:0] ck;\nendinterface\n\nmodule top;\n  leaf_if #(.WIDTH(4)) u_leaf ();\n  logic x;\n  assign x = u_leaf.ck[0];\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///a.sv", 7, 13, "u_leaf", "", false)
+	if !ok || len(locs) != 1 {
+		t.Fatalf("FindDefinition(u_leaf) = %+v, %v; want exactly one match", locs, ok)
+	}
+	if locs[0].Line != 5 || locs[0].Kind != KindVariable {
+		t.Fatalf("expected u_leaf's declaration at line 5 (KindVariable), got %+v", locs[0])
+	}
+}
+
 func TestFindDefinitionWalksUpMultipleScopeLevels(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///pkg.sv", `package pkg;
@@ -1050,6 +1080,33 @@ endmodule
 	for _, l := range locs {
 		if l.URI != "file:///a.sv" {
 			t.Fatalf("expected only file:///a.sv occurrences, got %+v", locs)
+		}
+	}
+}
+
+func TestScopedOccurrencesRestrictsInstanceNameToItsOwnModule(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", `module leaf;
+endmodule
+module mod_a;
+  leaf u_leaf();
+  assign u_leaf.x = 1;
+endmodule
+module mod_b;
+  leaf u_leaf();
+  assign u_leaf.x = 1;
+endmodule
+`)
+
+	// "u_leaf" at mod_a's usage site (line 4) must resolve to mod_a's own
+	// instance -- not mod_b's identically-named, unrelated instance.
+	locs := ix.ScopedOccurrences("file:///a.sv", 4, 10, "u_leaf", "", false)
+	if len(locs) != 2 {
+		t.Fatalf("expected 2 occurrences (declaration + usage) within mod_a only, got %+v", locs)
+	}
+	for _, l := range locs {
+		if l.Line != 3 && l.Line != 4 {
+			t.Fatalf("expected occurrences only on mod_a's own lines (3, 4), got %+v", locs)
 		}
 	}
 }

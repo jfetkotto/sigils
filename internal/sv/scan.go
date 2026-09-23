@@ -423,11 +423,13 @@ func recordMemberLink(links *[]memberLink, containerURI string, containerIdx int
 // and a specific-member import names an existing declaration, not a new
 // one) -- instead it's appended to impBuckets[uri] as an importDecl side
 // channel, consulted only by Index's import-based resolution step. An
-// *ast.Instantiation is handled the same way: its named connections/
-// overrides are appended to connBuckets[uri] as connectionSite side
-// channels, consulted only by Index's instantiation-connection scoping
-// (find-references/rename). Remaining node kinds with no useful
-// representation in any model (constraints) are still silently skipped.
+// *ast.Instantiation gets a leaf Declaration per instance for its own name
+// (so goto-definition/hover/rename on a usage site resolve like any other
+// local name), plus its named connections/overrides appended to
+// connBuckets[uri] as connectionSite side channels, consulted only by
+// Index's instantiation-connection scoping (find-references/rename).
+// Remaining node kinds with no useful representation in any model
+// (constraints) are still silently skipped.
 func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaration, impBuckets map[string][]importDecl, connBuckets map[string][]connectionSite, links *[]memberLink) {
 	switch n := d.(type) {
 	case *ast.Container:
@@ -568,6 +570,14 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 
 	case *ast.Instantiation:
 		for _, inst := range n.Instances {
+			appendDecl(buckets, uri, Declaration{
+				Kind: KindVariable, Name: inst.Name,
+				Line: inst.Line, Character: inst.Character,
+				EndLine: inst.Line, EndCharacter: inst.Character + UTF16Len(inst.Name),
+				Parent:   parent,
+				Detail:   n.ModuleType,
+				TypeName: n.ModuleType,
+			})
 			for _, conn := range inst.Connections {
 				if conn.Name == "" || conn.Wildcard {
 					continue // positional or ".*" -- no specific name to attribute
