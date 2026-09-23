@@ -1826,6 +1826,52 @@ func (ix *Index) InstantiationPortInfo(moduleName, portName string) (Declaration
 	return ix.byURI[ref.uri][ref.idx], true
 }
 
+// lookupModportRefsLocked resolves modportName against interfaceName's own
+// modports -- the same "find container by name globally, then its
+// children" shape as lookupInstantiationPortRefsLocked, restricted to
+// KindInterface (a modport can only ever belong to an interface, unlike an
+// instantiation port/param lookup which spans module/interface/program).
+func (ix *Index) lookupModportRefsLocked(interfaceName, modportName string) ([]declRef, bool) {
+	var out []declRef
+	for _, qref := range ix.byName[interfaceName] {
+		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+			continue
+		}
+		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, modportName)...)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// FindModport resolves modportName against interfaceName's own modport
+// declarations -- goto-definition/declaration for the modport-qualifier
+// half of "IfaceName.modport", e.g. an interface port's type header or a
+// virtual interface handle's type. Mirrors FindInstantiationPort.
+func (ix *Index) FindModport(interfaceName, modportName string) ([]Location, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	refs, ok := ix.lookupModportRefsLocked(interfaceName, modportName)
+	if !ok {
+		return nil, false
+	}
+	return ix.locationsLocked(refs), true
+}
+
+// ModportInfo is FindModport's hover counterpart, mirroring
+// InstantiationPortInfo.
+func (ix *Index) ModportInfo(interfaceName, modportName string) (Declaration, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	refs, ok := ix.lookupModportRefsLocked(interfaceName, modportName)
+	if !ok {
+		return Declaration{}, false
+	}
+	ref := ix.primaryRefLocked(refs)
+	return ix.byURI[ref.uri][ref.idx], true
+}
+
 // lookupSelfRefLocked reports whether (line, character) falls directly
 // within some declaration in uri named word -- resolving a click on a
 // declaration's own name to itself. Deliberately separate from (and

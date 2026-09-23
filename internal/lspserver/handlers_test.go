@@ -1459,6 +1459,62 @@ func TestTextDocumentDefinitionOnStructFieldGoesToTheFieldNotASameNamedPort(t *t
 	}
 }
 
+// Goto-definition on the modport-qualifier half of an interface port
+// (in_Apb.mo_slave) must land on that interface's own modport
+// declaration, not a same-named modport on an unrelated interface --
+// mo_slave/mo_master are near-universal modport names, so this collision
+// is the common case, not an edge case.
+func TestTextDocumentDefinitionOnModportGoesToItsOwnInterfaceNotASameNamedModportElsewhere(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_apb.sv", "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n")
+	openDoc(t, s, "file:///in_other.sv", "interface in_Other;\n  logic sig;\n  modport mo_slave (input sig);\nendinterface\n")
+	openDoc(t, s, "file:///leaf.sv", "module leaf (\n  in_Apb.mo_slave uin_Apb\n);\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///leaf.sv", 1, 11)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///in_apb.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("expected in_Apb's own modport declaration, got %+v", locs[0])
+	}
+}
+
+// The same DotReceiverAt mechanism should resolve a modport qualifier on
+// a virtual interface handle's type ("virtual IfaceName.modport
+// handle;"), not just an ANSI interface port -- confirmed rather than
+// assumed, since it's a different svparse call site
+// (parseVirtualInterfaceDecl) capturing the qualifier.
+func TestTextDocumentDefinitionOnVirtualInterfaceHandleModport(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_apb.sv", "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n")
+	openDoc(t, s, "file:///driver.sv", "class driver;\n  virtual in_Apb.mo_slave vif;\nendclass\n")
+
+	line := "  virtual in_Apb.mo_slave vif;"
+	modportChar := strings.Index(line, "mo_slave")
+	locs := definitionAt(t, s, "file:///driver.sv", 1, modportChar)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///in_apb.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("expected in_Apb's own modport declaration, got %+v", locs[0])
+	}
+}
+
+// A dot receiver that resolves but isn't an interface (a plain variable
+// here) must not resolve the word against some unrelated interface's
+// same-named modport -- it falls through to the ordinary path, which
+// finds nothing for a bare "mo_slave" with no scope-chain link here.
+func TestTextDocumentDefinitionModportFallsThroughWhenReceiverIsNotAnInterface(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_other.sv", "interface in_Other;\n  logic sig;\n  modport mo_slave (input sig);\nendinterface\n")
+	openDoc(t, s, "file:///consumer.sv", "module consumer;\n  logic sig;\n  assign sig = sig.mo_slave;\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///consumer.sv", 2, 21)
+	if len(locs) != 0 {
+		t.Fatalf("expected no location for a non-interface receiver, got %+v", locs)
+	}
+}
+
 // A dot that isn't a struct-field access must fall through to the ordinary
 // path, exactly as hover's equivalent check does.
 func TestTextDocumentDefinitionFallsThroughWhenReceiverIsNotAStruct(t *testing.T) {

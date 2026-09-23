@@ -469,6 +469,68 @@ func TestTextDocumentHoverStructFieldFallsBackWhenReceiverIsNotAStruct(t *testin
 	}
 }
 
+func TestTextDocumentHoverModportResolvesThroughReceiverInterface(t *testing.T) {
+	s := newTestServer()
+	src := "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n" +
+		"module leaf (\n  in_Apb.mo_slave uin_Apb\n);\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  in_Apb.mo_slave uin_Apb"
+	modportChar := strings.Index(line, "mo_slave")
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 5, Character: protocol.UInteger(modportChar)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result")
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if content.Value != "```systemverilog\nmodport mo_slave (input apbPSel)\n```" {
+		t.Fatalf("expected hover on the modport qualifier to show its port list, got %q", content.Value)
+	}
+}
+
+func TestTextDocumentHoverModportFallsBackWhenReceiverIsNotAnInterface(t *testing.T) {
+	s := newTestServer()
+	// "sig.mo_slave" isn't meaningful SV (sig is a plain logic, not an
+	// interface) -- WordAt/DotReceiverAt work on raw text, so this still
+	// reaches modportHover, which must recognize sig isn't KindInterface
+	// and fall through. Unlike the struct-field fallback case, a bare
+	// "mo_slave" has no other legitimate declaration shape to fall back
+	// TO here (a modport is never globally referenceable), so the correct
+	// end result is no hover at all, not a wrong one.
+	src := "module top;\n  logic sig;\n  assign sig = sig.mo_slave;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  assign sig = sig.mo_slave;"
+	fieldChar := strings.LastIndex(line, "mo_slave")
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 2, Character: protocol.UInteger(fieldChar)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover != nil {
+		t.Fatalf("expected no hover result, got %+v", hover)
+	}
+}
+
 func TestTextDocumentHoverParameterOverrideShowsTypeAndDefault(t *testing.T) {
 	s := newTestServer()
 	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
