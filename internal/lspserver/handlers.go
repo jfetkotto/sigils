@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/tliron/glsp"
 	protocol "github.com/tliron/glsp/protocol_3_16"
@@ -51,12 +52,22 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 	ctx, cancel := context.WithCancel(context.Background())
 
 	s.mu.Lock()
+	// glsp gates only NON-initialize methods before initialization, so a
+	// client that re-handshakes on the same connection lands here twice.
+	// Without cancelling the first run, its worker pool and its fsnotify
+	// watcher (one open fd per watched directory) leak for the life of the
+	// process: Shutdown can only ever cancel the newest.
+	prevCancel := s.watchCancel
 	s.root = root
 	s.cfg = cfg
 	s.discoverer = discoverer
 	s.watchCancel = cancel
 	s.snippetSupport = clientSupportsSnippets(params)
 	s.mu.Unlock()
+	if prevCancel != nil {
+		s.Log.Warning("initialize received again; cancelling the previous indexing pass")
+		prevCancel()
+	}
 
 	// Indexing can mean scanning a large chip workspace's worth of files,
 	// so it runs in the background rather than blocking the handshake.
@@ -132,7 +143,12 @@ func (s *Server) SetTrace(context *glsp.Context, params *protocol.SetTraceParams
 func (s *Server) TextDocumentDidOpen(context *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
 	doc := params.TextDocument
 	s.docs.Open(document.URI(doc.URI), doc.LanguageID, doc.Version, doc.Text)
-	s.publishDiagnostics(s.index.SetFile(doc.URI, doc.Text))
+	// The document store takes anything the client opens, so hover and
+	// completion work in that buffer; the workspace index takes only real
+	// files -- see isFileURI.
+	if isFileURI(doc.URI) {
+		s.publishDiagnostics(s.index.SetFile(doc.URI, doc.Text))
+	}
 	s.Log.Infof("opened %s", doc.URI)
 	return nil
 }
@@ -160,7 +176,9 @@ func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.D
 	if !s.docs.ApplyFullChange(document.URI(params.TextDocument.URI), params.TextDocument.Version, text) {
 		s.Log.Warningf("didChange for unknown document %s", params.TextDocument.URI)
 	}
-	s.publishDiagnostics(s.index.SetFile(string(params.TextDocument.URI), text))
+	if isFileURI(string(params.TextDocument.URI)) {
+		s.publishDiagnostics(s.index.SetFile(string(params.TextDocument.URI), text))
+	}
 	return nil
 }
 
@@ -215,8 +233,17 @@ func (s *Server) TextDocumentDeclaration(context *glsp.Context, params *protocol
 // via resolve (either sv.Index.FindDefinition or FindDeclaration -- both
 // share this exact signature), formatting the result as LSP locations.
 //
+// An `include directive's path is checked first: it's the one place in a
+// SystemVerilog file where the source text really is a file reference, and
+// the resolved target is already recorded in the index (see
+// sv.Index.IncludesOf) -- often reachable no other way, since the path may
+// resolve through a filelist's "+incdir+" rather than relative to the
+// including file. A cursor there never falls through to name resolution,
+// which would otherwise answer "`include \"pa_cfg.svh\"" with an unrelated
+// module named pa_cfg (see sv.IncludePathIn).
+//
 // A named port connection's port name (".clk(" at an instantiation site)
-// or a parameter override's name (".WIDTH(") is checked first, mirroring
+// or a parameter override's name (".WIDTH(") is checked next, mirroring
 // TextDocumentCompletion's own precedence -- neither has a scope-chain
 // link to the instantiated module at all (see
 // sv.Index.FindInstantiationPort's doc comment), so resolve would never
@@ -232,12 +259,20 @@ func (s *Server) resolveWordAt(
 	}
 	line, character := int(position.Line), int(position.Character)
 
+	toks := sv.Lex(text) // lexed once, shared by every probe below -- see sv.Tokens
+
+	if path, inDirective, ok := sv.IncludePathIn(toks, line, character); inDirective {
+		if !ok {
+			return nil, nil
+		}
+		return includeLocations(s.index.IncludesOf(uri), path), nil
+	}
+
 	word, start, ok := sv.WordAt(text, line, character)
 	if !ok {
 		return nil, nil
 	}
 
-	toks := sv.Lex(text) // lexed once, shared by both probes below -- see sv.Tokens
 	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		if locs, ok := s.index.FindInstantiationPort(moduleName, word); ok {
 			return formatLocations(locs, word), nil
@@ -249,6 +284,12 @@ func (s *Server) resolveWordAt(
 		}
 	}
 
+	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
+		if loc, ok := s.structFieldLocation(uri, text, line, character, receiver, receiverStart, word); ok {
+			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+		}
+	}
+
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
 	locs, ok := resolve(uri, line, character, word, qualifier, hasQualifier)
@@ -256,6 +297,50 @@ func (s *Server) resolveWordAt(
 		return nil, nil
 	}
 	return formatLocations(locs, word), nil
+}
+
+// structFieldLocation resolves "receiver.word" to the field's own
+// declaration inside its struct/union typedef, mirroring structFieldHover
+// on the query side.
+//
+// Without it, goto-definition was the last cursor handler still resolving
+// a field access by plain name: hover (structFieldHover) and
+// references/rename/highlight (ScopedOccurrencesForStructField) both go
+// through the receiver's type, so on "link.addr" where some unrelated
+// module also declares a port "addr", hover was right and F12 jumped into
+// the unrelated module -- silently wrong rather than simply empty.
+func (s *Server) structFieldLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.TypeName == "" {
+		return sv.Location{}, false
+	}
+	return s.index.StructFieldLocation(recv.TypeName, word)
+}
+
+// includeLocations matches an `include's written path against the URIs the
+// file's last scan actually resolved its includes to, by path suffix, and
+// points at the start of each match.
+//
+// Reusing the recorded resolution rather than resolving the path again means
+// no filesystem access, and guarantees goto-definition lands on the same file
+// the index really read. More than one match (the same basename included from
+// two directories) is a fine answer -- LSP takes a list. An include that never
+// resolved, because it sits in an `ifdef-excluded region or because the file
+// is missing, simply has no entry, and its unresolved-include diagnostic
+// already tells the user why.
+func includeLocations(resolved []string, path string) []protocol.Location {
+	path = strings.TrimPrefix(path, "./")
+	if path == "" {
+		return nil
+	}
+	var out []protocol.Location
+	for _, uri := range resolved {
+		if uri == path || strings.HasSuffix(uri, "/"+path) {
+			out = append(out, protocol.Location{URI: protocol.DocumentUri(uri)})
+		}
+	}
+	return out
 }
 
 func formatLocations(locs []sv.Location, word string) []protocol.Location {

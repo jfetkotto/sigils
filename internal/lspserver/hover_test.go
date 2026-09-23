@@ -840,3 +840,46 @@ func assertSelectionRangeContained(t *testing.T, syms []protocol.DocumentSymbol)
 		assertSelectionRangeContained(t, sym.Children)
 	}
 }
+
+// Occurrences deliberately record keyword tokens, so occByName["begin"]
+// holds every "begin" in the workspace. A keyword never resolves, so the
+// query fell into the unscoped fallback and materialized that entire list
+// on every cursor move -- then threw away everything outside this file.
+func TestDocumentHighlightOnAKeywordReturnsNothing(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///top.sv", "module top;\n  initial begin\n    x = 1;\n  end\nendmodule\n")
+
+	got, err := s.TextDocumentDocumentHighlight(nil, &protocol.DocumentHighlightParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///top.sv"},
+			Position:     protocol.Position{Line: 1, Character: 11}, // "begin"
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("expected no highlights for a keyword, got %+v", got)
+	}
+}
+
+// The restriction moved into the index, so confirm ordinary highlighting
+// still behaves: every occurrence in this file, nothing from another.
+func TestDocumentHighlightStillCoversTheWholeFile(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///top.sv", "module top;\n  logic sig;\n  assign sig = 1;\n  assign x = sig;\nendmodule\n")
+	openDoc(t, s, "file:///other.sv", "module other;\n  logic sig;\nendmodule\n")
+
+	got, err := s.TextDocumentDocumentHighlight(nil, &protocol.DocumentHighlightParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///top.sv"},
+			Position:     protocol.Position{Line: 1, Character: 8},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 3 {
+		t.Fatalf("expected the declaration and both uses, got %+v", got)
+	}
+}

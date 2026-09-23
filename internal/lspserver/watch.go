@@ -2,6 +2,8 @@ package lspserver
 
 import (
 	"context"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 	"time"
@@ -100,7 +102,20 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 			if !ok {
 				return false
 			}
-			if event.Op&(fsnotify.Write|fsnotify.Create) == 0 {
+			// Remove and Rename matter as much as Write and Create: a
+			// branch switch that deletes a source file usually leaves the
+			// filelist untouched, and removeStaleFiles (the only other
+			// path that drops an index entry) runs only when a FILELIST
+			// changes. Without this the file's declarations stay
+			// resolvable forever -- and rename would emit a TextEdit into
+			// it, which most clients apply by recreating the file.
+			//
+			// Whether the path is gone or merely replaced is decided at
+			// flush time, not here: an editor's atomic save is a rename,
+			// so Rename(x) is routinely followed by Create(x) within the
+			// same debounce window and the file is still there when the
+			// batch drains. See syncFromDisk.
+			if event.Op&(fsnotify.Write|fsnotify.Create|fsnotify.Remove|fsnotify.Rename) == 0 {
 				continue
 			}
 
@@ -126,7 +141,7 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 			}
 			changed := make([]string, 0, len(pending))
 			for eventPath, logicalPath := range pending {
-				s.reindexFromDisk(eventPath, logicalPath)
+				s.syncFromDisk(eventPath, logicalPath)
 				changed = append(changed, pathToURI(logicalPath))
 			}
 			clear(pending)
@@ -141,21 +156,30 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 	}
 }
 
-// reindexFromDisk re-reads one watched source file and replaces its index
-// entries, unless the document is open in the editor -- the live buffer
-// is authoritative while open.
-func (s *Server) reindexFromDisk(eventPath, logicalPath string) {
+// syncFromDisk brings one watched source file's index entries back in line
+// with what is actually on disk -- rescanning it, or dropping it if it is
+// gone -- unless the document is open in the editor, in which case the
+// live buffer is authoritative and neither applies.
+//
+// The read is what decides which: a single os.ReadFile rather than a stat
+// followed by a read, so a file recreated between the two can't be
+// mistaken for a deleted one.
+func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 	uri := pathToURI(logicalPath)
 	if _, open := s.docs.Get(document.URI(uri)); open {
 		return
 	}
 	data, err := os.ReadFile(eventPath)
-	if err != nil {
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		s.publishDiagnostics(s.index.RemoveFile(uri))
+		s.Log.Infof("dropped %s from the index (removed on disk)", logicalPath)
+	case err != nil:
 		s.Log.Warningf("file watching: could not reread %s: %s", eventPath, err)
-		return
+	default:
+		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
+		s.Log.Infof("reindexed %s after an on-disk change", logicalPath)
 	}
-	s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-	s.Log.Infof("reindexed %s after an on-disk change", logicalPath)
 }
 
 // cascadeReindexDependents re-reads and re-scans every file that
@@ -194,7 +218,7 @@ func (s *Server) cascadeReindexDependents(changed []string) {
 
 // reindexURI re-scans uri -- from its open editor buffer if it has one,
 // otherwise re-read from disk -- and replaces its index entries. Unlike
-// reindexFromDisk, an open buffer is NOT skipped here: this is called for
+// syncFromDisk, an open buffer is NOT skipped here: this is called for
 // a *dependent* of some other file whose `include d content just changed
 // (see cascadeReindexDependents), so even though uri's own text hasn't
 // changed, what it resolves to (macros, conditional-compilation state,
@@ -204,8 +228,7 @@ func (s *Server) cascadeReindexDependents(changed []string) {
 // declarations/diagnostics stay stale until its own next keystroke.
 // A no-op if uri isn't a resolvable file:// URI.
 func (s *Server) reindexURI(uri string) {
-	if doc, open := s.docs.Get(document.URI(uri)); open {
-		s.publishDiagnostics(s.index.SetFile(uri, doc.Text))
+	if s.scanOpenBuffer(uri) {
 		s.Log.Infof("reindexed open buffer %s after a dependency's on-disk change", uri)
 		return
 	}

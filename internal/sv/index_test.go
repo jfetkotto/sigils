@@ -2,6 +2,7 @@ package sv
 
 import (
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -1372,6 +1373,375 @@ func mustWorkspaceSymbols(ix *Index, query string) []SymbolLocation {
 	return syms
 }
 
+// A package body split across a .sv that opens the package and one or
+// more .svh headers is an ordinary layout, and the members that arrive
+// through the `include used to be invisible to package-member lookup:
+// walkDecls has to drop their cross-file Parent link, so childRefsLocked
+// never saw them as children of the package. These exercise both
+// directions of the membership the memberLink side channel restores.
+
+// pkgWithHeaderIndex builds the canonical split-package workspace:
+// pkg_cfg opens in its own .sv with one inline typedef and pulls two more
+// in from headers, and mod_top references them by qualifier.
+func pkgWithHeaderIndex() *Index {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"cfg_types.svh": "  typedef enum { MODE_A, MODE_B } t_mode;\n",
+			"cfg_defs.svh": "  typedef struct {\n" +
+				"    t_mode       mode;\n" +
+				"    t_inline_cfg base;\n" +
+				"  } t_header_cfg;\n",
+		}}
+	})
+	ix.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n"+
+		"  typedef struct { int fieldB; } t_inline_cfg;\n"+
+		"  `include \"cfg_types.svh\"\n"+
+		"  `include \"cfg_defs.svh\"\n"+
+		"endpackage\n")
+	ix.SetFile("file:///mod_top.sv", "module mod_top #(\n"+
+		"    pkg_cfg::t_inline_cfg P1,\n"+
+		"    pkg_cfg::t_header_cfg P2\n"+
+		"  ) ();\nendmodule\n")
+	return ix
+}
+
+func TestHoverInfoResolvesQualifiedPackageMemberFromIncludedFile(t *testing.T) {
+	ix := pkgWithHeaderIndex()
+
+	d, ok := ix.HoverInfo("file:///mod_top.sv", 2, 13, "t_header_cfg", "pkg_cfg", true)
+	if !ok || d.Kind != KindTypedef || d.Name != "t_header_cfg" {
+		t.Fatalf("HoverInfo(pkg_cfg::t_header_cfg) = %+v, %v", d, ok)
+	}
+	if d.TypedefKind != "struct" {
+		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind)
+	}
+
+	// The inline sibling, which never lost its Parent link, must still
+	// resolve the same way -- the whole symptom was these two behaving
+	// differently within one parameter list.
+	if _, ok := ix.HoverInfo("file:///mod_top.sv", 1, 13, "t_inline_cfg", "pkg_cfg", true); !ok {
+		t.Fatalf("expected the inline package member to keep resolving")
+	}
+}
+
+func TestFindDefinitionResolvesQualifiedPackageMemberToItsHeader(t *testing.T) {
+	ix := pkgWithHeaderIndex()
+
+	locs, ok := ix.FindDefinition("file:///mod_top.sv", 2, 13, "t_header_cfg", "pkg_cfg", true)
+	if !ok || len(locs) != 1 {
+		t.Fatalf("FindDefinition(pkg_cfg::t_header_cfg) = %+v, %v", locs, ok)
+	}
+	if locs[0].URI != "file:///cfg_defs.svh" {
+		t.Fatalf("expected the declaration's own header, got %+v", locs[0])
+	}
+}
+
+func TestWildcardImportSeesPackageMemberFromIncludedFile(t *testing.T) {
+	ix := pkgWithHeaderIndex()
+	ix.SetFile("file:///wild.sv", "import pkg_cfg::*;\nmodule wild;\n  t_header_cfg cfg;\n  t_inline_cfg base;\nendmodule\n")
+
+	if _, ok := ix.HoverInfo("file:///wild.sv", 2, 2, "t_header_cfg", "", false); !ok {
+		t.Fatalf("expected the included package member to resolve through import pkg_cfg::*")
+	}
+	if _, ok := ix.HoverInfo("file:///wild.sv", 3, 2, "t_inline_cfg", "", false); !ok {
+		t.Fatalf("expected the inline package member to keep resolving through the wildcard import")
+	}
+}
+
+func TestSpecificImportSeesPackageMemberFromIncludedFile(t *testing.T) {
+	ix := pkgWithHeaderIndex()
+	ix.SetFile("file:///specific.sv", "import pkg_cfg::t_header_cfg;\nmodule m;\n  t_header_cfg cfg;\nendmodule\n")
+
+	if _, ok := ix.HoverInfo("file:///specific.sv", 2, 2, "t_header_cfg", "", false); !ok {
+		t.Fatalf("expected import pkg_cfg::t_header_cfg to name the included member")
+	}
+}
+
+func TestResolvesFromInsideAnIncludedHeaderIntoItsPackage(t *testing.T) {
+	// The mirror direction: a declaration written in the header is
+	// lexically inside the package, so the package's other members are in
+	// scope for it -- both the ones typed inline in pkg_cfg.sv and the
+	// ones in a *sibling* header of the same package.
+	ix := pkgWithHeaderIndex()
+
+	locs, ok := ix.FindDefinition("file:///cfg_defs.svh", 2, 4, "t_inline_cfg", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///pkg_cfg.sv" {
+		t.Fatalf("FindDefinition(t_inline_cfg from the header) = %+v, %v", locs, ok)
+	}
+
+	locs, ok = ix.FindDefinition("file:///cfg_defs.svh", 1, 4, "t_mode", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///cfg_types.svh" {
+		t.Fatalf("FindDefinition(t_mode from a sibling header) = %+v, %v", locs, ok)
+	}
+}
+
+func TestResolvesFromInsideAnIncludedHeaderThroughThePackagesImport(t *testing.T) {
+	// A header pulled into a package body sees what the package itself
+	// imports -- the "package pkg; import common::*; `include ..." shape.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"cfg_defs.svh": "  typedef struct { t_common c; } t_header_cfg;\n",
+		}}
+	})
+	ix.SetFile("file:///common_pkg.sv", "package common_pkg;\n  typedef logic [7:0] t_common;\nendpackage\n")
+	ix.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  import common_pkg::*;\n  `include \"cfg_defs.svh\"\nendpackage\n")
+
+	locs, ok := ix.FindDefinition("file:///cfg_defs.svh", 0, 19, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common from the header) = %+v, %v", locs, ok)
+	}
+}
+
+func TestIncludeAtFileScopeIsNotAPackageMember(t *testing.T) {
+	// The `include sits before the package, not inside its body, so
+	// nothing it brings in is a member of that package -- the precision
+	// that keeps "pkg_cfg::" from resolving against every header the
+	// package's file happens to pull in first.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"other.svh": "typedef logic [7:0] t_other;\n"}}
+	})
+	ix.SetFile("file:///pkg_cfg.sv", "`include \"other.svh\"\npackage pkg_cfg;\n  typedef struct { int fieldB; } t_inline_cfg;\nendpackage\n")
+
+	if _, ok := ix.FindDefinition("file:///mod.sv", 0, 0, "t_other", "pkg_cfg", true); ok {
+		t.Fatalf("expected a file-scope `include not to become a member of the file's package")
+	}
+}
+
+func TestIncludedMemberResolvesFromEveryPackageIncludingIt(t *testing.T) {
+	// Textual inclusion into two package bodies makes the declaration a
+	// member of both; there's one bucket for it, so both qualifiers land
+	// on the same location.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"shared.svh": "  typedef logic [7:0] t_shared;\n"}}
+	})
+	ix.SetFile("file:///pkg_a.sv", "package pkg_a;\n  `include \"shared.svh\"\nendpackage\n")
+	ix.SetFile("file:///pkg_b.sv", "package pkg_b;\n  `include \"shared.svh\"\nendpackage\n")
+
+	for _, pkg := range []string{"pkg_a", "pkg_b"} {
+		locs, ok := ix.FindDefinition("file:///mod.sv", 0, 0, "t_shared", pkg, true)
+		if !ok || len(locs) != 1 || locs[0].URI != "file:///shared.svh" {
+			t.Fatalf("FindDefinition(%s::t_shared) = %+v, %v", pkg, locs, ok)
+		}
+	}
+}
+
+func TestRescanningOneIncluderLeavesAnotherPackagesMembershipAlone(t *testing.T) {
+	// Membership is retracted per scanning file: pkg_a dropping its
+	// `include says nothing about pkg_b's, even though both recorded a
+	// link to the same header.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"shared.svh": "  typedef logic [7:0] t_shared;\n"}}
+	})
+	ix.SetFile("file:///pkg_a.sv", "package pkg_a;\n  `include \"shared.svh\"\nendpackage\n")
+	ix.SetFile("file:///pkg_b.sv", "package pkg_b;\n  `include \"shared.svh\"\nendpackage\n")
+
+	ix.SetFile("file:///pkg_a.sv", "package pkg_a;\nendpackage\n")
+
+	if _, ok := ix.FindDefinition("file:///mod.sv", 0, 0, "t_shared", "pkg_a", true); ok {
+		t.Fatalf("expected pkg_a::t_shared to stop resolving once pkg_a dropped its `include")
+	}
+	if _, ok := ix.FindDefinition("file:///mod.sv", 0, 0, "t_shared", "pkg_b", true); !ok {
+		t.Fatalf("expected pkg_b::t_shared to be unaffected by pkg_a's rescan")
+	}
+
+	ix.RemoveFile("file:///pkg_b.sv")
+	if _, ok := ix.FindDefinition("file:///mod.sv", 0, 0, "t_shared", "pkg_b", true); ok {
+		t.Fatalf("expected pkg_b::t_shared to stop resolving once pkg_b was removed")
+	}
+}
+
+func TestQualifiedLookupSurvivesAStandaloneRescanOfTheHeader(t *testing.T) {
+	// Opening the header in the editor gives it its own SetFile call,
+	// which rewrites its declaration bucket with no idea it's a package
+	// body (see SetFile's doc comment). The membership lives beside the
+	// buckets rather than inside them precisely so it survives that.
+	ix := pkgWithHeaderIndex()
+	ix.SetFile("file:///cfg_defs.svh", "  typedef struct {\n    int fieldA;\n  } t_header_cfg;\n")
+
+	if _, ok := ix.HoverInfo("file:///mod_top.sv", 2, 13, "t_header_cfg", "pkg_cfg", true); !ok {
+		t.Fatalf("expected pkg_cfg::t_header_cfg to keep resolving while its header is open")
+	}
+}
+
+func TestScopedOccurrencesOnAnIncludedPackageMemberStaysUnrestricted(t *testing.T) {
+	// Resolution now succeeds where it used to fail, but the declaration
+	// still carries Parent -1 in its own bucket, so containerScopeLocked
+	// still declines to restrict and rename keeps returning the
+	// workspace-wide occurrence list it always did.
+	ix := pkgWithHeaderIndex()
+	// Occurrence data for a file only ever comes from its own direct
+	// SetFile call, which the server issues for every include-discovered
+	// file (see scanIncludeDiscoveredFiles in internal/lspserver).
+	ix.SetFile("file:///cfg_defs.svh", "  typedef struct {\n    t_mode       mode;\n    t_inline_cfg base;\n  } t_header_cfg;\n")
+
+	locs := ix.ScopedOccurrences("file:///mod_top.sv", 2, 13, "t_header_cfg", "pkg_cfg", true)
+	uris := map[string]bool{}
+	for _, l := range locs {
+		uris[l.URI] = true
+	}
+	if !uris["file:///cfg_defs.svh"] || !uris["file:///mod_top.sv"] {
+		t.Fatalf("expected occurrences in both the header and the referencing file, got %+v", locs)
+	}
+}
+
+func TestFindDefinitionResolvesFileScopeTypedefFromInsideAModule(t *testing.T) {
+	// The scope-chain walk terminates on Parent -1, which is also what
+	// file scope is, so the outermost rung needs its own pass -- without
+	// it a typedef and a module side by side in one file don't see each
+	// other.
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef logic [7:0] bus_t;\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///a.sv", 2, 2, "bus_t", "", false)
+	if !ok || len(locs) != 1 || locs[0].Line != 0 {
+		t.Fatalf("FindDefinition(bus_t) = %+v, %v", locs, ok)
+	}
+}
+
+// An import statement lands in the bucket of the file it's written in,
+// exactly like a declaration, so one written in a header used to be
+// invisible to the file that `include d it -- even though after
+// preprocessing it's just an import sitting in the includer.
+
+const commonPkgSrc = "package common_pkg;\n  typedef logic [7:0] t_common;\n  typedef logic t_other;\nendpackage\n"
+
+func TestImportInAnIncludedHeaderIsVisibleToTheIncluder(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top;\n  t_common c;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common) = %+v, %v", locs, ok)
+	}
+}
+
+func TestImportInAHeaderIncludedIntoAPackageIsVisibleInThatPackagesFile(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"imports.svh\"\n  typedef t_common t_alias;\nendpackage\n")
+
+	locs, ok := ix.FindDefinition("file:///pkg_cfg.sv", 2, 10, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common) = %+v, %v", locs, ok)
+	}
+}
+
+func TestImportFromOneHeaderIsVisibleInASiblingHeaderOfTheSamePackage(t *testing.T) {
+	// One header carries the package's imports, another uses them -- the
+	// reference and the import statement are in two different files, and
+	// neither is the file that opens the package.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"imports.svh": "import common_pkg::*;\n",
+			"defs.svh":    "  typedef t_common t_alias;\n",
+		}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"imports.svh\"\n  `include \"defs.svh\"\nendpackage\n")
+
+	locs, ok := ix.FindDefinition("file:///defs.svh", 0, 10, "t_common", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///common_pkg.sv" {
+		t.Fatalf("FindDefinition(t_common) = %+v, %v", locs, ok)
+	}
+}
+
+func TestSpecificImportThroughAnIncludeGrantsOnlyThatName(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::t_common;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top;\n  t_common c;\n  t_other o;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false); !ok {
+		t.Fatalf("expected the specifically imported name to resolve")
+	}
+	if _, ok := ix.FindDefinition("file:///top.sv", 3, 2, "t_other", "", false); ok {
+		t.Fatalf("expected a name the specific import doesn't grant to stay unresolved")
+	}
+}
+
+func TestContainerScopedImportInAHeaderDoesNotLeakToTheIncluder(t *testing.T) {
+	// The import is inside a module declared in the header, so it's that
+	// module's, not the includer's -- only a header's file-scope imports
+	// carry across.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"helper.svh": "module helper;\n  import common_pkg::*;\nendmodule\n",
+		}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"helper.svh\"\nmodule top;\n  t_common c;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false); ok {
+		t.Fatalf("expected an import scoped to a container inside the header not to leak")
+	}
+}
+
+func TestImportInAHeaderIsNotVisibleToAFileThatDoesNotIncludeIt(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top; endmodule\n")
+	ix.SetFile("file:///b.sv", "module b;\n  t_common c;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///b.sv", 1, 2, "t_common", "", false); ok {
+		t.Fatalf("expected b.sv not to see an import it never included")
+	}
+}
+
+func TestIncludedImportStopsResolvingWhenTheIncludeGoesAway(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import common_pkg::*;\n"}}
+	})
+	ix.SetFile("file:///common_pkg.sv", commonPkgSrc)
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nmodule top;\n  t_common c;\nendmodule\n")
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 2, "t_common", "", false); !ok {
+		t.Fatalf("expected t_common to resolve while the `include is there")
+	}
+
+	ix.SetFile("file:///top.sv", "module top;\n  t_common c;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 1, 2, "t_common", "", false); ok {
+		t.Fatalf("expected t_common to stop resolving once top.sv dropped its `include")
+	}
+}
+
+func TestDirectImportWinsOverOneReachedThroughAnInclude(t *testing.T) {
+	// Both packages declare "foo". The import written in top.sv itself is
+	// the more specific statement of intent, so the included one isn't
+	// consulted at all and the result stays unambiguous.
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"imports.svh": "import pkg_a::*;\n"}}
+	})
+	ix.SetFile("file:///pkg_a.sv", "package pkg_a;\n  typedef logic foo;\nendpackage\n")
+	ix.SetFile("file:///pkg_b.sv", "package pkg_b;\n  typedef logic foo;\nendpackage\n")
+	ix.SetFile("file:///top.sv", "`include \"imports.svh\"\nimport pkg_b::*;\nmodule top;\n  foo f;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///top.sv", 3, 2, "foo", "", false)
+	if !ok || len(locs) != 1 || locs[0].URI != "file:///pkg_b.sv" {
+		t.Fatalf("FindDefinition(foo) = %+v, %v", locs, ok)
+	}
+}
+
 // recordDependencies replaces uri's dependency set directly, bypassing a
 // real Scan. It lives here rather than in index.go because nothing in
 // production ever calls it -- SetFile records dependencies inline via
@@ -1465,5 +1835,250 @@ func BenchmarkWorkspaceSymbolsEmptyQuery(b *testing.B) {
 	b.ResetTimer()
 	for range b.N {
 		ix.WorkspaceSymbols("", 500)
+	}
+}
+
+// The reported collision: a struct field whose name is also an unrelated
+// module's port. Before ScopedOccurrencesForStructField the field query
+// resolved to nothing and fell back to the unscoped, name-wide list, so
+// find-references on it crossed into a module with no relation to the
+// receiver's type at all.
+func structFieldCollisionIndex(t *testing.T) *Index {
+	t.Helper()
+	ix := NewIndex()
+	ix.SetFile("file:///pkg_types.sv", "package pkg_types;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n")
+	ix.SetFile("file:///consumer.sv", "module mod_consumer (\n  input pkg_types::ty_bundle st_FromClock\n);\n  logic result;\n  assign result = st_FromClock.ckSideband[0];\nendmodule\n")
+	ix.SetFile("file:///unrelated.sv", "module mod_unrelated (\n  input logic [3:0] ckSideband\n);\nendmodule\n")
+	ix.SetFile("file:///wrapper.sv", "module mod_unrelated_wrapper;\n  logic [3:0] sig;\n  mod_unrelated u_unrelated (.ckSideband(sig));\nendmodule\n")
+	return ix
+}
+
+func TestScopedOccurrencesForStructFieldExcludesUnrelatedSameNamedPort(t *testing.T) {
+	ix := structFieldCollisionIndex(t)
+
+	// Cursor on "ckSideband" in "st_FromClock.ckSideband", consumer.sv line 4.
+	locs, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "st_FromClock", "", false, "ckSideband")
+	if !ok {
+		t.Fatalf("expected the struct-field path to apply")
+	}
+	for _, l := range locs {
+		if l.URI == "file:///unrelated.sv" || l.URI == "file:///wrapper.sv" {
+			t.Fatalf("unrelated occurrence leaked into the result: %+v (all: %+v)", l, locs)
+		}
+	}
+	var sawAccess, sawDecl bool
+	for _, l := range locs {
+		switch l.URI {
+		case "file:///consumer.sv":
+			sawAccess = true
+		case "file:///pkg_types.sv":
+			sawDecl = true
+		}
+	}
+	if !sawAccess {
+		t.Fatalf("expected the field access itself, got %+v", locs)
+	}
+	if !sawDecl {
+		t.Fatalf("expected the field's own declaration inside the typedef, got %+v", locs)
+	}
+}
+
+func TestScopedOccurrencesForStructFieldDeclinesWhenReceiverIsNotAStruct(t *testing.T) {
+	ix := structFieldCollisionIndex(t)
+
+	// "result" is a plain logic, not a struct -- the caller must fall back.
+	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "result", "", false, "ckSideband"); ok {
+		t.Fatalf("expected the struct-field path to decline for a non-struct receiver")
+	}
+	// An unresolvable receiver declines too.
+	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "no_such_signal", "", false, "ckSideband"); ok {
+		t.Fatalf("expected the struct-field path to decline for an unresolved receiver")
+	}
+	// So does a name that isn't a field of the receiver's struct.
+	if _, ok := ix.ScopedOccurrencesForStructField("file:///consumer.sv", 4, 31, "st_FromClock", "", false, "notAField"); ok {
+		t.Fatalf("expected the struct-field path to decline for a non-member name")
+	}
+}
+
+// Deleting an `include line must retract what that header contributed. It
+// used to keep both its declarations and its diagnostics indefinitely, and
+// stay out of touchedURIs so the server never republished to clear them.
+func TestSetFileRetractsAnIncludeThatIsNoLongerThere(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\nbroken syntax here ;\n"}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"defs.svh\"\nmodule top;\nendmodule\n")
+
+	if _, ok := ix.Lookup("bus_t"); !ok {
+		t.Fatalf("expected bus_t to be indexed while the include is present")
+	}
+	if len(ix.Diagnostics("file:///defs.svh")) == 0 {
+		t.Fatalf("expected the header's own diagnostics to be recorded")
+	}
+
+	touched := ix.SetFile("file:///top.sv", "module top;\nendmodule\n")
+
+	if _, ok := ix.Lookup("bus_t"); ok {
+		t.Fatalf("bus_t still resolves after its header stopped being included")
+	}
+	if diags := ix.Diagnostics("file:///defs.svh"); len(diags) != 0 {
+		t.Fatalf("stale diagnostics survived on the dropped header: %+v", diags)
+	}
+	if !slices.Contains(touched, "file:///defs.svh") {
+		t.Fatalf("the dropped header must be touched so the server republishes it, got %v", touched)
+	}
+}
+
+// A header two files include must survive one of them dropping it.
+func TestSetFileKeepsAnIncludeAnotherFileStillHas(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"}}
+	})
+	ix.SetFile("file:///a.sv", "`include \"defs.svh\"\nmodule a;\nendmodule\n")
+	ix.SetFile("file:///b.sv", "`include \"defs.svh\"\nmodule b;\nendmodule\n")
+
+	ix.SetFile("file:///a.sv", "module a;\nendmodule\n")
+
+	if _, ok := ix.Lookup("bus_t"); !ok {
+		t.Fatalf("bus_t was dropped even though b.sv still includes its header")
+	}
+}
+
+func TestRemoveFileRetractsHeadersOnlyItReached(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"defs.svh\"\nmodule top;\nendmodule\n")
+
+	cleared := ix.RemoveFile("file:///top.sv")
+
+	if _, ok := ix.Lookup("bus_t"); ok {
+		t.Fatalf("bus_t still resolves after its only includer was removed")
+	}
+	if !slices.Contains(cleared, "file:///defs.svh") || !slices.Contains(cleared, "file:///top.sv") {
+		t.Fatalf("expected both URIs reported for republishing, got %v", cleared)
+	}
+}
+
+// Which of two same-named declarations a single-answer query reports must
+// not depend on the order the files happened to be indexed in -- the
+// indexing worker pool runs SetFile across files nondeterministically, so
+// scan order made hover's answer drift between restarts.
+func TestHoverInfoPicksTheSameDeclarationRegardlessOfIndexOrder(t *testing.T) {
+	const (
+		aSrc   = "package pkg_a;\n  typedef logic [7:0] cfg_t;\nendpackage\n"
+		bSrc   = "package pkg_b;\n  typedef logic [15:0] cfg_t;\nendpackage\n"
+		useSrc = "module top;\n  cfg_t data;\nendmodule\n"
+	)
+
+	forward := NewIndex()
+	forward.SetFile("file:///a.sv", aSrc)
+	forward.SetFile("file:///b.sv", bSrc)
+	forward.SetFile("file:///use.sv", useSrc)
+
+	reverse := NewIndex()
+	reverse.SetFile("file:///b.sv", bSrc)
+	reverse.SetFile("file:///a.sv", aSrc)
+	reverse.SetFile("file:///use.sv", useSrc)
+
+	got1, ok1 := forward.Typedef("cfg_t")
+	got2, ok2 := reverse.Typedef("cfg_t")
+	if !ok1 || !ok2 {
+		t.Fatalf("expected cfg_t to resolve in both orders (%v, %v)", ok1, ok2)
+	}
+	if got1.Line != got2.Line || got1.AliasType != got2.AliasType {
+		t.Fatalf("index order changed the answer: %+v vs %+v", got1, got2)
+	}
+}
+
+// An `include exposes the header's FILE scope, not what is nested inside a
+// container in it. Resolving a package member by bare name here is a wrong
+// answer that masks a real compile error.
+func TestIncludeDoesNotExposeAPackagesMembersUnqualified(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{
+			"types.svh": "package pkg_types;\n  typedef logic [7:0] addr_t;\nendpackage\n",
+		}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"types.svh\"\nmodule top;\n  addr_t sig;\nendmodule\n")
+
+	if locs, ok := ix.FindDefinition("file:///top.sv", 2, 3, "addr_t", "", false); ok {
+		t.Fatalf("a package member should not resolve by bare name through an include: %+v", locs)
+	}
+	// Qualified access to the same member must still work.
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 3, "addr_t", "pkg_types", true); !ok {
+		t.Fatalf("pkg_types::addr_t should still resolve")
+	}
+}
+
+// A file-scope declaration in an included header stays reachable -- that is
+// what an include is for, and the Parent filter must not break it.
+func TestIncludeStillExposesFileScopeDeclarations(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"}}
+	})
+	ix.SetFile("file:///top.sv", "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	if _, ok := ix.FindDefinition("file:///top.sv", 2, 3, "bus_t", "", false); !ok {
+		t.Fatalf("a file-scope typedef in an included header must still resolve")
+	}
+}
+
+// "import pkg::*;" at file scope AND in the module header is a common
+// belt-and-braces pattern; both resolve to the same declaration.
+func TestDoubleWildcardImportResolvesToOneLocation(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///pkg.sv", "package pkg;\n  typedef logic [7:0] bus_t;\nendpackage\n")
+	ix.SetFile("file:///top.sv", "import pkg::*;\nmodule top;\n  import pkg::*;\n  bus_t data;\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///top.sv", 3, 3, "bus_t", "", false)
+	if !ok {
+		t.Fatalf("bus_t did not resolve")
+	}
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+}
+
+// preferGloballyLocked's filter is name + Kind + Prototype with no scope,
+// so an unrelated class's same-named method used to be offered alongside
+// (or instead of) the right one. UVM code defines build_phase in hundreds
+// of classes.
+func TestPrototypePreferenceDoesNotReachIntoAnUnrelatedClass(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "class comp_a;\n  extern function void build_phase();\nendclass\nfunction void comp_a::build_phase();\nendfunction\n")
+	ix.SetFile("file:///b.sv", "class comp_b;\n  function void build_phase();\n  endfunction\nendclass\n")
+
+	// Cursor on the extern prototype in comp_a: definition should prefer
+	// the body, and must not offer comp_b's.
+	locs, ok := ix.FindDefinition("file:///a.sv", 1, 23, "build_phase", "", false)
+	if !ok {
+		t.Fatalf("build_phase did not resolve")
+	}
+	for _, l := range locs {
+		if l.URI == "file:///b.sv" {
+			t.Fatalf("an unrelated class's method leaked in: %+v", locs)
+		}
+	}
+}
+
+func TestStructFieldLocationPointsAtTheFieldsOwnDeclaration(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///p.sv", "package pkg;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n")
+
+	loc, ok := ix.StructFieldLocation("ty_bundle", "ckSideband")
+	if !ok {
+		t.Fatalf("expected the field to be locatable")
+	}
+	if loc.URI != "file:///p.sv" || loc.Line != 2 {
+		t.Fatalf("unexpected location: %+v", loc)
+	}
+	if _, ok := ix.StructFieldLocation("ty_bundle", "nope"); ok {
+		t.Fatalf("a non-member must not resolve")
 	}
 }

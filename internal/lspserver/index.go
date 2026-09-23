@@ -70,9 +70,9 @@ func (s *Server) buildIndex(ctx context.Context, discoverer workspace.Discoverer
 					continue // keep draining so the feed loop can't block
 				}
 				uri := pathToURI(file.LogicalPath)
-				if doc, open := s.docs.Get(document.URI(uri)); open {
+				if _, open := s.docs.Get(document.URI(uri)); open {
 					// The live editor buffer is authoritative while open
-					// (same reasoning as reindexFromDisk/removeStaleFiles) --
+					// (same reasoning as syncFromDisk/removeStaleFiles) --
 					// but this rebuild pass can be running because a
 					// filelist edit just changed the workspace's
 					// `+incdir+`/`+define+` (the resolver factory/initial
@@ -82,7 +82,7 @@ func (s *Server) buildIndex(ctx context.Context, discoverer workspace.Discoverer
 					// through SetFile like everything else rather than
 					// left untouched with whatever config was active at
 					// its last keystroke.
-					s.publishDiagnostics(s.index.SetFile(uri, doc.Text))
+					s.scanOpenBuffer(uri)
 					indexed.Add(1)
 					continue
 				}
@@ -198,12 +198,11 @@ func (s *Server) scanIncludeDiscoveredFiles(ctx context.Context, discovered []wo
 		if err != nil {
 			continue
 		}
-		if doc, open := s.docs.Get(document.URI(uri)); open {
-			// Same "buffer text, but still re-scanned through SetFile"
-			// treatment as the worker pool above -- an `include d file can
-			// also be directly open in the editor, and this pass's
-			// resolver/macro config may have just changed.
-			s.publishDiagnostics(s.index.SetFile(uri, doc.Text))
+		// Same "buffer text, but still re-scanned through SetFile"
+		// treatment as the worker pool above -- an `include d file can
+		// also be directly open in the editor, and this pass's
+		// resolver/macro config may have just changed.
+		if s.scanOpenBuffer(uri) {
 			extra = append(extra, workspace.SourceFile{LogicalPath: path, ResolvedPath: path})
 			continue
 		}
@@ -216,6 +215,33 @@ func (s *Server) scanIncludeDiscoveredFiles(ctx context.Context, discovered []wo
 		extra = append(extra, workspace.SourceFile{LogicalPath: path, ResolvedPath: path})
 	}
 	return extra
+}
+
+// scanOpenBuffer indexes an open document's live text, retrying if an edit
+// landed while the scan was in flight.
+//
+// docs.Get and index.SetFile are each safe on their own but not atomic
+// together, so a didChange arriving between them let a background pass
+// write version N over the version N+1 the handler had already indexed.
+// That showed up as a diagnostic or a goto-definition result reverting to
+// the pre-keystroke state and staying there until the next keystroke.
+// Re-reading after the write and repeating while the version has moved
+// converges on the newest text without a lock, and so without serializing
+// the worker pool that made background indexing parallel in the first
+// place. Reports whether the document was open at all.
+func (s *Server) scanOpenBuffer(uri string) bool {
+	doc, open := s.docs.Get(document.URI(uri))
+	if !open {
+		return false
+	}
+	for {
+		s.publishDiagnostics(s.index.SetFile(uri, doc.Text))
+		latest, stillOpen := s.docs.Get(document.URI(uri))
+		if !stillOpen || latest.Version == doc.Version {
+			return true
+		}
+		doc = latest
+	}
 }
 
 // removeStaleFiles drops index entries for every URI in prev that current
@@ -232,8 +258,7 @@ func (s *Server) removeStaleFiles(prev, current map[string]bool) {
 		if _, open := s.docs.Get(document.URI(uri)); open {
 			continue
 		}
-		s.index.RemoveFile(uri)
-		s.publishDiagnostics([]string{uri})
+		s.publishDiagnostics(s.index.RemoveFile(uri))
 		s.Log.Infof("dropped %s from the index (no longer referenced by the workspace)", uri)
 	}
 }

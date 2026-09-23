@@ -320,12 +320,9 @@ func (s *Server) TextDocumentDocumentHighlight(context *glsp.Context, params *pr
 	}
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
-	locs := s.scopedOccurrences(sv.Lex(text), params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
+	locs := s.fileOccurrences(sv.Lex(text), text, params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
 	out := make([]protocol.DocumentHighlight, 0, len(locs))
 	for _, loc := range locs {
-		if loc.URI != params.TextDocument.URI {
-			continue
-		}
 		out = append(out, protocol.DocumentHighlight{Range: loc.Range})
 	}
 	return out, nil

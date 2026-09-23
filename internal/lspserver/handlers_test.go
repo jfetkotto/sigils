@@ -1179,3 +1179,296 @@ func TestTextDocumentCompletionStructMemberFallsBackToNilWhenReceiverIsNotAStruc
 		t.Fatalf("expected a nil result for a non-struct receiver with an empty prefix, got %#v", result)
 	}
 }
+
+func TestTextDocumentCompletionSuggestsStructMembersForIncludedPackageType(t *testing.T) {
+	// The receiver's type is declared in a header included into a package
+	// body, so its Declaration lives in the header's bucket with no
+	// Parent link back to the package.
+	s := newTestServer()
+	s.Index().SetIncludeResolverFactory(func() sv.IncludeResolver {
+		return &mapResolver{files: map[string]string{
+			"cfg_defs.svh": "  typedef struct packed { logic [7:0] unique_field; logic flag; } t_header_cfg;\n",
+		}}
+	})
+	s.Index().SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
+
+	uri := "file:///a.sv"
+	src := "module top;\n  pkg_cfg::t_header_cfg cfg;\n  cfg.\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  cfg." on line 2 ends at character 6, right after the dot.
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 2, Character: 6},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 struct-member items, got %#v", result)
+	}
+	if items[0].Label != "unique_field" || items[1].Label != "flag" {
+		t.Fatalf("expected [unique_field, flag], got [%s, %s]", items[0].Label, items[1].Label)
+	}
+}
+
+// testIncludeResolver is the lspserver-side counterpart of internal/sv's own
+// stub: it resolves a fixed set of include paths without touching disk.
+type testIncludeResolver struct {
+	files    map[string]string // path as written -> text
+	resolved []string
+}
+
+func (r *testIncludeResolver) Resolve(includedPath, fromFile string) (text, resolvedPath string, err error) {
+	t, ok := r.files[includedPath]
+	if !ok {
+		return "", "", fmt.Errorf("testIncludeResolver: %q not found", includedPath)
+	}
+	uri := "file:///inc/" + includedPath
+	r.resolved = append(r.resolved, uri)
+	return t, uri, nil
+}
+
+func (r *testIncludeResolver) Resolved() []string { return append([]string(nil), r.resolved...) }
+
+func serverWithIncludes(t *testing.T, files map[string]string) *Server {
+	t.Helper()
+	s := newTestServer()
+	s.index.SetIncludeResolverFactory(func() sv.IncludeResolver {
+		return &testIncludeResolver{files: files}
+	})
+	return s
+}
+
+func openDoc(t *testing.T, s *Server, uri, text string) {
+	t.Helper()
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{
+			URI: protocol.DocumentUri(uri), LanguageID: "systemverilog", Version: 1, Text: text,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func definitionAt(t *testing.T, s *Server, uri string, line, character int) []protocol.Location {
+	t.Helper()
+	got, err := s.TextDocumentDefinition(nil, &protocol.DefinitionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri(uri)},
+			Position:     protocol.Position{Line: uint32(line), Character: uint32(character)},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil {
+		return nil
+	}
+	locs, ok := got.([]protocol.Location)
+	if !ok {
+		t.Fatalf("unexpected definition result type %T", got)
+	}
+	return locs
+}
+
+func TestTextDocumentDefinitionOnIncludePathJumpsToTheResolvedFile(t *testing.T) {
+	s := serverWithIncludes(t, map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"})
+	openDoc(t, s, "file:///top.sv", "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	for name, character := range map[string]int{"basename": 11, "extension": 16, "directive": 3} {
+		t.Run(name, func(t *testing.T) {
+			locs := definitionAt(t, s, "file:///top.sv", 0, character)
+			if len(locs) != 1 {
+				t.Fatalf("expected 1 location, got %+v", locs)
+			}
+			if locs[0].URI != "file:///inc/defs.svh" {
+				t.Fatalf("unexpected URI: %+v", locs[0])
+			}
+			if locs[0].Range.Start.Line != 0 || locs[0].Range.Start.Character != 0 {
+				t.Fatalf("expected the start of the file, got %+v", locs[0].Range)
+			}
+		})
+	}
+}
+
+func TestTextDocumentDefinitionOnIncludePathDoesNotJumpToASameNamedModule(t *testing.T) {
+	// The reported wrong answer: resolving the path as an identifier lands on
+	// an unrelated module that happens to share the basename.
+	s := serverWithIncludes(t, map[string]string{"pa_cfg.svh": "typedef logic cfg_t;\n"})
+	openDoc(t, s, "file:///other.sv", "module pa_cfg;\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "package pa_top;\n`include \"pa_cfg.svh\"\nendpackage\n")
+
+	locs := definitionAt(t, s, "file:///top.sv", 1, 12)
+	for _, l := range locs {
+		if l.URI == "file:///other.sv" {
+			t.Fatalf("goto-definition jumped to the unrelated module: %+v", locs)
+		}
+	}
+	if len(locs) != 1 || locs[0].URI != "file:///inc/pa_cfg.svh" {
+		t.Fatalf("expected the included header, got %+v", locs)
+	}
+}
+
+func TestTextDocumentDefinitionOnUnresolvedIncludePathReturnsNothing(t *testing.T) {
+	s := serverWithIncludes(t, nil)
+	openDoc(t, s, "file:///top.sv", "`include \"missing.svh\"\nmodule top; endmodule\n")
+
+	if locs := definitionAt(t, s, "file:///top.sv", 0, 11); len(locs) != 0 {
+		t.Fatalf("expected no location for an unresolved include, got %+v", locs)
+	}
+}
+
+func TestTextDocumentDefinitionOnMacroBuiltIncludePathReturnsNothing(t *testing.T) {
+	s := serverWithIncludes(t, nil)
+	openDoc(t, s, "file:///other.sv", "module PATH_MACRO;\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "`include `PATH_MACRO\nmodule top; endmodule\n")
+
+	if locs := definitionAt(t, s, "file:///top.sv", 0, 3); len(locs) != 0 {
+		t.Fatalf("expected no location for a macro-built include path, got %+v", locs)
+	}
+}
+
+func TestTextDocumentDefinitionStillResolvesIdentifiersInAFileWithIncludes(t *testing.T) {
+	s := serverWithIncludes(t, map[string]string{"defs.svh": "typedef logic [7:0] bus_t;\n"})
+	openDoc(t, s, "file:///top.sv", "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///top.sv", 2, 4)
+	if len(locs) != 1 || locs[0].URI != "file:///inc/defs.svh" {
+		t.Fatalf("expected bus_t to still resolve, got %+v", locs)
+	}
+}
+
+// A port declared "direction net_type data_type name" (LRM 23.2.2.3) used
+// to be dropped from svparse's port list entirely, so it had no Declaration
+// here and every feature keyed off it silently returned nothing at each
+// instantiation site. Fixed in svparse v0.1.5; pinned here because the
+// symptom only ever surfaced downstream, in a different file from the cause.
+func TestTextDocumentDefinitionResolvesAPortDeclaredWithANetType(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///leaf.sv", "module leaf(\n  input  wire  logic       clk,\n  input  wire  logic [3:0] requestBuff_a\n);\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "module top;\n  logic [3:0] sig;\n  leaf u_leaf (.requestBuff_a(sig));\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///top.sv", 2, 20)
+	if len(locs) != 1 || locs[0].URI != "file:///leaf.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("goto-definition on .requestBuff_a = %+v", locs)
+	}
+}
+
+// A client opens plenty of documents that aren't files on disk -- VS
+// Code's diff view uses "git:", an unsaved buffer is "untitled:". Those
+// belong in the document store but not in the workspace index: indexing
+// one puts a second copy of every declaration under a URI nothing resolves
+// back to a path, so goto-definition offers both and rename emits an edit
+// into a document the client may not let the user write.
+func TestNonFileDocumentsStayOutOfTheIndex(t *testing.T) {
+	for _, uri := range []string{
+		`git:/repo/top.sv?{"ref":"HEAD"}`,
+		"untitled:Untitled-1",
+	} {
+		t.Run(uri, func(t *testing.T) {
+			s := newTestServer()
+			openDoc(t, s, uri, "module ghost_module;\nendmodule\n")
+
+			if _, ok := s.Index().Lookup("ghost_module"); ok {
+				t.Fatalf("%s was indexed", uri)
+			}
+			// It must still be readable, so hover and completion work.
+			if _, ok := s.textForURI(uri); !ok {
+				t.Fatalf("%s should still be in the document store", uri)
+			}
+		})
+	}
+}
+
+func TestFileDocumentsAreStillIndexed(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///top.sv", "module real_module;\nendmodule\n")
+	if _, ok := s.Index().Lookup("real_module"); !ok {
+		t.Fatalf("a file:// document should be indexed")
+	}
+}
+
+// glsp gates only non-initialize methods before initialization, so a
+// client that re-handshakes lands in Initialize twice. The first indexing
+// pass and its fsnotify watcher used to leak for the life of the process,
+// because Shutdown can only ever cancel the newest.
+func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
+	root := t.TempDir()
+	s := newTestServer()
+	params := &protocol.InitializeParams{
+		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: protocol.DocumentUri("file://" + root), Name: "root"}},
+	}
+
+	if _, err := s.Initialize(nil, params); err != nil {
+		t.Fatal(err)
+	}
+
+	// Stand in for the first pass's cancel func so its invocation is
+	// observable; the real one has already been installed by the call
+	// above and cancelling it here changes nothing else.
+	cancelled := make(chan struct{})
+	s.mu.Lock()
+	realFirst := s.watchCancel
+	s.watchCancel = func() { close(cancelled) }
+	s.mu.Unlock()
+	defer realFirst()
+
+	if _, err := s.Initialize(nil, params); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-cancelled:
+	default:
+		t.Fatal("the second initialize did not cancel the first indexing pass")
+	}
+
+	s.mu.Lock()
+	second := s.watchCancel
+	s.mu.Unlock()
+	if second == nil {
+		t.Fatal("expected the second initialize to install its own cancel func")
+	}
+	second()
+}
+
+// Goto-definition was the last cursor handler resolving a field access by
+// plain name: hover and references/rename already went through the
+// receiver's type, so F12 on "st.ckSideband" jumped into an unrelated
+// module's same-named port -- silently wrong, not merely empty.
+func TestTextDocumentDefinitionOnStructFieldGoesToTheFieldNotASameNamedPort(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///pkg_types.sv", "package pkg_types;\n  typedef struct packed {\n    logic [3:0] ckSideband;\n  } ty_bundle;\nendpackage\n")
+	openDoc(t, s, "file:///unrelated.sv", "module mod_unrelated (\n  input logic [3:0] ckSideband\n);\nendmodule\n")
+	openDoc(t, s, "file:///consumer.sv", "module mod_consumer (\n  input pkg_types::ty_bundle st_FromClock\n);\n  logic result;\n  assign result = st_FromClock.ckSideband[0];\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///consumer.sv", 4, 31)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///pkg_types.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("expected the field's own declaration, got %+v", locs[0])
+	}
+}
+
+// A dot that isn't a struct-field access must fall through to the ordinary
+// path, exactly as hover's equivalent check does.
+func TestTextDocumentDefinitionFallsThroughWhenReceiverIsNotAStruct(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///leaf.sv", "module leaf(input logic clk);\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "module top;\n  logic clk;\n  leaf u_leaf (.clk(clk));\nendmodule\n")
+
+	// ".clk(" is a named port connection, not a field access.
+	locs := definitionAt(t, s, "file:///top.sv", 2, 16)
+	if len(locs) != 1 || locs[0].URI != "file:///leaf.sv" {
+		t.Fatalf("named port connection should still resolve to the port: %+v", locs)
+	}
+}

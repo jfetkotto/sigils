@@ -1,10 +1,10 @@
 module github.com/jfetkotto/sigils
 
-go 1.26.4
+go 1.26
 
 require (
 	github.com/fsnotify/fsnotify v1.10.1
-	github.com/jfetkotto/svparse v0.1.4
+	github.com/jfetkotto/svparse v0.1.7
 	github.com/tliron/commonlog v0.2.8
 	github.com/tliron/glsp v0.2.2
 )
