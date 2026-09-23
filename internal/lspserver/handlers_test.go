@@ -1180,6 +1180,46 @@ func TestTextDocumentCompletionStructMemberFallsBackToNilWhenReceiverIsNotAStruc
 	}
 }
 
+// Completion after an interface-typed instance's "." should offer the
+// interface's own signal names, the same way a struct-typed receiver's
+// fields already do -- the completion half of
+// interface-instance-member-goto-completion-unresolvable.md.
+func TestTextDocumentCompletionSuggestsInterfaceMembers(t *testing.T) {
+	s := newTestServer()
+	uri := "file:///a.sv"
+	src := "interface in_bus;\n  logic [31:0] hAddr;\n  logic hWrite;\n  modport mo_master (output hAddr, output hWrite);\nendinterface\n" +
+		"module top (\n  in_bus.mo_master uin_Bus\n);\n" +
+		"  uin_Bus.\n" +
+		"endmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  uin_Bus." on line 8 ends at character 10 (right after the dot).
+	line := "  uin_Bus."
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 8, Character: protocol.UInteger(len(line))},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 interface-member items, got %#v", result)
+	}
+	if items[0].Label != "hAddr" || items[1].Label != "hWrite" {
+		t.Fatalf("expected [hAddr, hWrite], got [%s, %s]", items[0].Label, items[1].Label)
+	}
+	if items[0].Detail == nil || *items[0].Detail != "logic [31:0]" {
+		t.Fatalf("expected hAddr detail \"logic [31:0]\", got %+v", items[0].Detail)
+	}
+}
+
 func TestTextDocumentCompletionSuggestsStructMembersForIncludedPackageType(t *testing.T) {
 	// The receiver's type is declared in a header included into a package
 	// body, so its Declaration lives in the header's bucket with no
@@ -1456,6 +1496,27 @@ func TestTextDocumentDefinitionOnStructFieldGoesToTheFieldNotASameNamedPort(t *t
 	}
 	if locs[0].URI != "file:///pkg_types.sv" || locs[0].Range.Start.Line != 2 {
 		t.Fatalf("expected the field's own declaration, got %+v", locs[0])
+	}
+}
+
+// Goto-definition on the signal half of an interface-typed instance's
+// member access (uin_Bus.hAddr) must land on that interface's own signal
+// declaration, not a same-named port/variable elsewhere -- the gap
+// interface-instance-member-goto-completion-unresolvable.md reports.
+func TestTextDocumentDefinitionOnInterfaceMemberGoesToItsOwnInterfaceNotASameNamedSignalElsewhere(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_bus.sv", "interface in_bus;\n  logic [31:0] hAddr;\n  modport mo_master (output hAddr);\nendinterface\n")
+	openDoc(t, s, "file:///unrelated.sv", "module mod_unrelated (\n  input logic [31:0] hAddr\n);\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "module top (\n  in_bus.mo_master uin_Bus\n);\n  logic [31:0] tmp;\n  assign tmp = uin_Bus.hAddr;\nendmodule\n")
+
+	line := "  assign tmp = uin_Bus.hAddr;"
+	fieldChar := strings.LastIndex(line, "hAddr")
+	locs := definitionAt(t, s, "file:///top.sv", 4, fieldChar)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///in_bus.sv" || locs[0].Range.Start.Line != 1 {
+		t.Fatalf("expected in_bus's own hAddr declaration, got %+v", locs[0])
 	}
 }
 

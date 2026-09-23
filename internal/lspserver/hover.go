@@ -55,6 +55,9 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 		if hover, ok := s.structFieldHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
 			return hover, nil
 		}
+		if hover, ok := s.interfaceMemberHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
+			return hover, nil
+		}
 		if hover, ok := s.modportHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
 			return hover, nil
 		}
@@ -103,6 +106,29 @@ func (s *Server) structFieldHover(uri, text string, line, character int, receive
 		}
 	}
 	return nil, false
+}
+
+// interfaceMemberHover resolves receiver.word to one of receiver's own
+// interface's member declarations (e.g. an interface-typed port's signal),
+// mirroring structFieldHover -- gated on the same recv.TypeName != "" check,
+// since receiver here is a typed instance, not the interface type itself
+// (see modportHover for that case). Tried only after structFieldHover
+// already failed: recv.TypeName might name either a struct/union typedef or
+// an interface, and StructFields already reports "not found" cleanly for
+// the latter.
+func (s *Server) interfaceMemberHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.TypeName == "" {
+		return nil, false
+	}
+	decl, ok := s.index.InterfaceMemberInfo(recv.TypeName, word)
+	if !ok {
+		return nil, false
+	}
+	return &protocol.Hover{
+		Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
+	}, true
 }
 
 // modportHover resolves receiver.word to a modport declaration inside
