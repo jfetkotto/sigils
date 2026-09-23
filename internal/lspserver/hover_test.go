@@ -469,6 +469,40 @@ func TestTextDocumentHoverStructFieldFallsBackWhenReceiverIsNotAStruct(t *testin
 	}
 }
 
+func TestTextDocumentHoverInterfaceMemberResolvesThroughReceiverType(t *testing.T) {
+	// Same shape as TestTextDocumentHoverStructFieldResolvesThroughReceiverType,
+	// except the receiver's declared type is an interface, not a struct
+	// typedef -- the exact gap interface-instance-member-access-unresolvable.md
+	// reports.
+	s := newTestServer()
+	src := "interface in_bus;\n  logic [31:0] hAddr;\n  modport mo_master (output hAddr);\nendinterface\n" +
+		"module top (\n  in_bus.mo_master uin_Bus\n);\n  logic [31:0] tmp;\n  assign tmp = uin_Bus.hAddr;\nendmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: "file:///a.sv", LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	line := "  assign tmp = uin_Bus.hAddr;"
+	fieldChar := strings.LastIndex(line, "hAddr")
+
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: "file:///a.sv"},
+			Position:     protocol.Position{Line: 8, Character: protocol.UInteger(fieldChar)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	if hover == nil {
+		t.Fatalf("expected a hover result")
+	}
+	content, _ := hover.Contents.(protocol.MarkupContent)
+	if content.Value != "```systemverilog\nlogic [31:0] hAddr\n```" {
+		t.Fatalf("expected hover on \"uin_Bus.hAddr\" to resolve to in_bus's own hAddr signal, got %q", content.Value)
+	}
+}
+
 func TestTextDocumentHoverModportResolvesThroughReceiverInterface(t *testing.T) {
 	s := newTestServer()
 	src := "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n" +

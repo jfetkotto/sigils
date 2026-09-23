@@ -561,6 +561,72 @@ func TestIndexStructFieldsAcceptsUnion(t *testing.T) {
 	}
 }
 
+func TestIndexInterfaceMembers(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic [31:0] hAddr;\n  logic hWrite;\n  modport mo_master (output hAddr, output hWrite);\nendinterface\n")
+
+	members, ok := ix.InterfaceMembers("in_bus")
+	if !ok || len(members) != 2 || members[0].Name != "hAddr" || members[1].Name != "hWrite" {
+		t.Fatalf("InterfaceMembers(in_bus) = %+v, %v", members, ok)
+	}
+	if members[0].Detail != "logic [31:0]" {
+		t.Fatalf("expected hAddr's detail to be its declared type, got %q", members[0].Detail)
+	}
+}
+
+func TestIndexInterfaceMembersMissing(t *testing.T) {
+	ix := NewIndex()
+	if _, ok := ix.InterfaceMembers("nope"); ok {
+		t.Fatalf("expected no members for an unknown name")
+	}
+}
+
+func TestIndexInterfaceMembersIgnoresNonInterfaceKind(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module in_bus;\n  logic hAddr;\nendmodule\n")
+	if _, ok := ix.InterfaceMembers("in_bus"); ok {
+		t.Fatalf("expected InterfaceMembers to ignore a module sharing an interface's name")
+	}
+}
+
+func TestIndexInterfaceMembersExcludesModports(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic hAddr;\n  modport mo_master (output hAddr);\nendinterface\n")
+
+	members, ok := ix.InterfaceMembers("in_bus")
+	if !ok || len(members) != 1 || members[0].Name != "hAddr" {
+		t.Fatalf("expected only the signal member, got %+v, %v", members, ok)
+	}
+}
+
+func TestIndexFindInterfaceMember(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic [31:0] hAddr;\nendinterface\n")
+
+	locs, ok := ix.FindInterfaceMember("in_bus", "hAddr")
+	if !ok || len(locs) != 1 || locs[0].Line != 1 {
+		t.Fatalf("FindInterfaceMember(in_bus, hAddr) = %+v, %v", locs, ok)
+	}
+}
+
+func TestIndexFindInterfaceMemberMissing(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic hAddr;\nendinterface\n")
+	if _, ok := ix.FindInterfaceMember("in_bus", "nope"); ok {
+		t.Fatalf("expected no location for an unknown member name")
+	}
+}
+
+func TestIndexInterfaceMemberInfo(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic [31:0] hAddr;\nendinterface\n")
+
+	d, ok := ix.InterfaceMemberInfo("in_bus", "hAddr")
+	if !ok || d.Kind != KindVariable || d.Detail != "logic [31:0]" {
+		t.Fatalf("InterfaceMemberInfo(in_bus, hAddr) = %+v, %v", d, ok)
+	}
+}
+
 func TestIndexTypedefReturnsFullDeclaration(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "typedef struct packed { logic [7:0] a; } bus_t;\n")

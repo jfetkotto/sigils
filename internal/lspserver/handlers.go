@@ -288,6 +288,9 @@ func (s *Server) resolveWordAt(
 		if loc, ok := s.structFieldLocation(uri, text, line, character, receiver, receiverStart, word); ok {
 			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
 		}
+		if loc, ok := s.interfaceMemberLocation(uri, text, line, character, receiver, receiverStart, word); ok {
+			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+		}
 		if loc, ok := s.modportLocation(uri, text, line, character, receiver, receiverStart, word); ok {
 			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
 		}
@@ -319,6 +322,27 @@ func (s *Server) structFieldLocation(uri, text string, line, character int, rece
 		return sv.Location{}, false
 	}
 	return s.index.StructFieldLocation(recv.TypeName, word)
+}
+
+// interfaceMemberLocation resolves "receiver.word" to the member's own
+// declaration inside receiver's own interface, mirroring
+// structFieldLocation -- gated on the same recv.TypeName != "" check,
+// since receiver here is a typed instance, not the interface type itself
+// (see modportLocation for that case). Unlike a struct/union field, an
+// interface member's own Declaration already carries a real position, so
+// this needs no analogue of struct-field goto-definition's missing-target
+// problem.
+func (s *Server) interfaceMemberLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.TypeName == "" {
+		return sv.Location{}, false
+	}
+	locs, ok := s.index.FindInterfaceMember(recv.TypeName, word)
+	if !ok || len(locs) == 0 {
+		return sv.Location{}, false
+	}
+	return locs[0], true
 }
 
 // modportLocation resolves "receiver.word" to a modport declaration
@@ -394,11 +418,12 @@ const maxSymbolCompletions = 200
 //     only "localparam" entries are excluded from the candidates
 //     (sv.Index.Params), since those can never legally appear on the
 //     right of ".name(value)" here.
-//  3. Struct/union member completion when the cursor directly follows
-//     "receiver." and receiver resolves (via sv.Index.HoverInfo, the same
-//     resolution goto-definition and hover already use) to a port or
-//     variable whose own declared type is itself a struct or union
-//     typedef -- see structMemberCompletionItems. Deliberately narrow:
+//  3. Struct/union member (or interface-instance signal) completion when
+//     the cursor directly follows "receiver." and receiver resolves (via
+//     sv.Index.HoverInfo, the same resolution goto-definition and hover
+//     already use) to a port or variable whose own declared type is
+//     itself a struct/union typedef or an interface -- see
+//     structMemberCompletionItems. Deliberately narrow:
 //     only a *direct* struct/union typedef reference is resolved, not a
 //     chain of plain alias typedefs that eventually names one, not nested
 //     field-of-field access ("a.b.c" where b is itself struct-typed --
@@ -524,20 +549,22 @@ func (s *Server) portCompletionItems(text string, line, character int, ports []s
 
 // structMemberCompletionItems offers completion for "receiver." where
 // receiver is a port or local variable whose own declared type directly
-// names a struct or union typedef -- e.g. completing "st_bundle." to that
-// struct's field names. It resolves receiver the same way hover does
-// (sv.WordAt + sv.QualifierAt + sv.Index.HoverInfo, passing the ORIGINAL
-// cursor line/character for scope resolution, not receiver's own start
-// column -- see hover.go's identical pattern) rather than introducing a
-// second resolver, then looks its Declaration.TypeName up as a
-// struct/union typedef via sv.Index.StructFields. ok is false whenever
-// this path doesn't apply at all (no dot immediately precedes the typed
-// prefix, no identifier immediately precedes the dot, receiver doesn't
-// resolve, or its type isn't a struct/union typedef) -- the caller falls
-// back to general symbol completion in that case, not an empty result,
-// since a bare "." after something else entirely (a plain "logic"
-// variable, an unresolved name) is still a valid, if unscoped, completion
-// request, same as before this existed.
+// names a struct or union typedef, or an interface -- e.g. completing
+// "st_bundle." to that struct's field names, or "uin_bus." to an
+// interface-typed port's own signal names. It resolves receiver the same
+// way hover does (sv.WordAt + sv.QualifierAt + sv.Index.HoverInfo, passing
+// the ORIGINAL cursor line/character for scope resolution, not receiver's
+// own start column -- see hover.go's identical pattern) rather than
+// introducing a second resolver, then looks its Declaration.TypeName up as
+// a struct/union typedef via sv.Index.StructFields, falling back to
+// sv.Index.InterfaceMembers when that type name is an interface instead.
+// ok is false whenever neither path applies at all (no dot immediately
+// precedes the typed prefix, no identifier immediately precedes the dot,
+// receiver doesn't resolve, or its type is neither a struct/union typedef
+// nor an interface) -- the caller falls back to general symbol completion
+// in that case, not an empty result, since a bare "." after something
+// else entirely (a plain "logic" variable, an unresolved name) is still a
+// valid, if unscoped, completion request, same as before this existed.
 func (s *Server) structMemberCompletionItems(text, uri string, line, character int) ([]protocol.CompletionItem, bool) {
 	prefixStart, hasDot := sv.CompletionEditRange(text, line, character)
 	if !hasDot {
@@ -554,7 +581,10 @@ func (s *Server) structMemberCompletionItems(text, uri string, line, character i
 	}
 	fields, ok := s.index.StructFields(decl.TypeName)
 	if !ok {
-		return nil, false
+		fields, ok = s.index.InterfaceMembers(decl.TypeName)
+		if !ok {
+			return nil, false
+		}
 	}
 	return s.portCompletionItems(text, line, character, fields, nil, false), true
 }
