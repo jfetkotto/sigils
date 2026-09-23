@@ -288,6 +288,9 @@ func (s *Server) resolveWordAt(
 		if loc, ok := s.structFieldLocation(uri, text, line, character, receiver, receiverStart, word); ok {
 			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
 		}
+		if loc, ok := s.modportLocation(uri, text, line, character, receiver, receiverStart, word); ok {
+			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+		}
 	}
 
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
@@ -316,6 +319,24 @@ func (s *Server) structFieldLocation(uri, text string, line, character int, rece
 		return sv.Location{}, false
 	}
 	return s.index.StructFieldLocation(recv.TypeName, word)
+}
+
+// modportLocation resolves "receiver.word" to a modport declaration
+// inside receiver's own interface, mirroring structFieldLocation --
+// except gated on recv.Kind == KindInterface rather than recv.TypeName !=
+// "", since an interface name IS a type (it has none of its own to point
+// at).
+func (s *Server) modportLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.Kind != sv.KindInterface {
+		return sv.Location{}, false
+	}
+	locs, ok := s.index.FindModport(recv.Name, word)
+	if !ok || len(locs) == 0 {
+		return sv.Location{}, false
+	}
+	return locs[0], true
 }
 
 // includeLocations matches an `include's written path against the URIs the

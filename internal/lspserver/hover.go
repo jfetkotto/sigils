@@ -55,6 +55,9 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 		if hover, ok := s.structFieldHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
 			return hover, nil
 		}
+		if hover, ok := s.modportHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
+			return hover, nil
+		}
 	}
 
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
@@ -100,6 +103,25 @@ func (s *Server) structFieldHover(uri, text string, line, character int, receive
 		}
 	}
 	return nil, false
+}
+
+// modportHover resolves receiver.word to a modport declaration inside
+// receiver's own interface, mirroring structFieldHover -- except gated on
+// recv.Kind == KindInterface rather than recv.TypeName != "", since an
+// interface name IS a type (it has none of its own to point at).
+func (s *Server) modportHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
+	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
+	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
+	if !ok || recv.Kind != sv.KindInterface {
+		return nil, false
+	}
+	decl, ok := s.index.ModportInfo(recv.Name, word)
+	if !ok {
+		return nil, false
+	}
+	return &protocol.Hover{
+		Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
+	}, true
 }
 
 // fieldHoverText renders a single struct/union field the same way a port
@@ -148,6 +170,8 @@ func hoverText(d sv.Declaration) string {
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
 	case sv.KindParameter:
 		fmt.Fprintf(&b, "parameter %s", parameterText(d))
+	case sv.KindModport:
+		fmt.Fprintf(&b, "modport %s (%s)", d.Name, d.Detail)
 	case sv.KindTypedef:
 		b.WriteString(typedefText(d))
 	case sv.KindEnumMember:

@@ -804,6 +804,24 @@ func TestScanDeclarationsTracksPortsAsIndependentDeclarations(t *testing.T) {
 	}
 }
 
+func TestScanDeclarationsModportIsChildOfInterface(t *testing.T) {
+	// A modport is a leaf KindModport Declaration, parented to its
+	// enclosing interface -- the same pattern KindPort/KindParameter
+	// already use, resolved via Index.FindModport/ModportInfo rather than
+	// the ordinary scope-chain walk (a modport is never referenced from
+	// inside its own interface's scope).
+	src := "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n"
+	decls := ScanDeclarations("test.sv", src)
+
+	mo := findDecl(t, decls, "mo_slave")
+	if mo.Kind != KindModport || decls[mo.Parent].Name != "in_Apb" {
+		t.Fatalf("unexpected mo_slave: %+v", mo)
+	}
+	if mo.Detail != "input apbPSel" {
+		t.Fatalf("unexpected detail: %q", mo.Detail)
+	}
+}
+
 func TestScanDeclarationsFunctionArgs(t *testing.T) {
 	src := "module top;\n  function automatic int add(int a, int b);\n    return a + b;\n  endfunction\nendmodule\n"
 	decls := ScanDeclarations("test.sv", src)

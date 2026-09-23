@@ -48,6 +48,14 @@ const (
 	KindPort      Kind = "port"
 	KindVariable  Kind = "variable"
 	KindParameter Kind = "parameter"
+
+	// KindModport is a leaf too, but unlike KindPort/KindVariable/
+	// KindParameter it's never resolvable via the ordinary scope-chain
+	// walk at all -- it's only ever reached as a specific interface's own
+	// child, via Index.FindModport/ModportInfo (mirroring
+	// FindInstantiationPort's "resolve the container by name, then look
+	// up its child" shape for a named-port connection).
+	KindModport Kind = "modport"
 )
 
 // ContainerKinds are the declaration kinds that can hold other
@@ -565,6 +573,18 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Default: joinTokenText(n.Default),
 		})
 
+	case *ast.Modport:
+		// Reached via walkDecls(n.Body, ...) from the *ast.Container case
+		// above -- parent is already the enclosing interface's own index,
+		// so this needs no special parenting step, same as KindPort.
+		appendDecl(buckets, uri, Declaration{
+			Kind: KindModport, Name: n.Name,
+			Line: n.Line, Character: n.Character,
+			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
+			Parent: parent,
+			Detail: modportDetail(n.Ports),
+		})
+
 	case *ast.Import:
 		impBuckets[uri] = append(impBuckets[uri], importDecl{Package: n.Package, Member: n.Member, Parent: parent})
 
@@ -680,6 +700,22 @@ func portDetail(dir ast.Direction, t ast.Type) string {
 		parts = append(parts, typeText)
 	}
 	return strings.Join(parts, " ")
+}
+
+// modportDetail renders a modport's port list for hover display, e.g.
+// "input req, output gnt" -- portDetail's direction-then-name shape one
+// level removed, since a modport port has no type of its own, only a
+// direction and the name of a signal it exposes.
+func modportDetail(ports []ast.ModportPort) string {
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		if p.Direction != ast.DirUnspecified {
+			parts = append(parts, string(p.Direction)+" "+p.Name)
+		} else {
+			parts = append(parts, p.Name)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatType renders t as a human-readable string (e.g. "logic [7:0]",
