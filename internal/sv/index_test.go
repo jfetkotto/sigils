@@ -386,6 +386,36 @@ func TestFindDefinitionUnqualifiedModuleFallsBackAcrossFiles(t *testing.T) {
 	}
 }
 
+func TestFindDefinitionResolvesModuleInstanceNameFromUsageSite(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module leaf;\nendmodule\n\nmodule top;\n  leaf u_leaf();\n  logic x;\n  assign x = u_leaf.y;\nendmodule\n")
+
+	// Line 4 ("  leaf u_leaf();") is where the instance itself is declared;
+	// line 6 ("  assign x = u_leaf.y;") is a later usage site with no
+	// declaration of its own -- it must resolve back to the instance's
+	// name in the instantiation statement.
+	locs, ok := ix.FindDefinition("file:///a.sv", 6, 15, "u_leaf", "", false)
+	if !ok || len(locs) != 1 {
+		t.Fatalf("FindDefinition(u_leaf) = %+v, %v; want exactly one match", locs, ok)
+	}
+	if locs[0].Line != 4 || locs[0].Kind != KindVariable {
+		t.Fatalf("expected u_leaf's declaration at line 4 (KindVariable), got %+v", locs[0])
+	}
+}
+
+func TestFindDefinitionResolvesInterfaceInstanceNameFromUsageSite(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface leaf_if ();\n  logic [3:0] ck;\nendinterface\n\nmodule top;\n  leaf_if #(.WIDTH(4)) u_leaf ();\n  logic x;\n  assign x = u_leaf.ck[0];\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///a.sv", 7, 13, "u_leaf", "", false)
+	if !ok || len(locs) != 1 {
+		t.Fatalf("FindDefinition(u_leaf) = %+v, %v; want exactly one match", locs, ok)
+	}
+	if locs[0].Line != 5 || locs[0].Kind != KindVariable {
+		t.Fatalf("expected u_leaf's declaration at line 5 (KindVariable), got %+v", locs[0])
+	}
+}
+
 func TestFindDefinitionWalksUpMultipleScopeLevels(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///pkg.sv", `package pkg;
@@ -528,6 +558,72 @@ func TestIndexStructFieldsAcceptsUnion(t *testing.T) {
 	ix.SetFile("file:///a.sv", "typedef union packed { logic [7:0] a; logic [7:0] b; } u_t;\n")
 	if _, ok := ix.StructFields("u_t"); !ok {
 		t.Fatalf("expected StructFields to accept a union typedef")
+	}
+}
+
+func TestIndexInterfaceMembers(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic [31:0] hAddr;\n  logic hWrite;\n  modport mo_master (output hAddr, output hWrite);\nendinterface\n")
+
+	members, ok := ix.InterfaceMembers("in_bus")
+	if !ok || len(members) != 2 || members[0].Name != "hAddr" || members[1].Name != "hWrite" {
+		t.Fatalf("InterfaceMembers(in_bus) = %+v, %v", members, ok)
+	}
+	if members[0].Detail != "logic [31:0]" {
+		t.Fatalf("expected hAddr's detail to be its declared type, got %q", members[0].Detail)
+	}
+}
+
+func TestIndexInterfaceMembersMissing(t *testing.T) {
+	ix := NewIndex()
+	if _, ok := ix.InterfaceMembers("nope"); ok {
+		t.Fatalf("expected no members for an unknown name")
+	}
+}
+
+func TestIndexInterfaceMembersIgnoresNonInterfaceKind(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module in_bus;\n  logic hAddr;\nendmodule\n")
+	if _, ok := ix.InterfaceMembers("in_bus"); ok {
+		t.Fatalf("expected InterfaceMembers to ignore a module sharing an interface's name")
+	}
+}
+
+func TestIndexInterfaceMembersExcludesModports(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic hAddr;\n  modport mo_master (output hAddr);\nendinterface\n")
+
+	members, ok := ix.InterfaceMembers("in_bus")
+	if !ok || len(members) != 1 || members[0].Name != "hAddr" {
+		t.Fatalf("expected only the signal member, got %+v, %v", members, ok)
+	}
+}
+
+func TestIndexFindInterfaceMember(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic [31:0] hAddr;\nendinterface\n")
+
+	locs, ok := ix.FindInterfaceMember("in_bus", "hAddr")
+	if !ok || len(locs) != 1 || locs[0].Line != 1 {
+		t.Fatalf("FindInterfaceMember(in_bus, hAddr) = %+v, %v", locs, ok)
+	}
+}
+
+func TestIndexFindInterfaceMemberMissing(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic hAddr;\nendinterface\n")
+	if _, ok := ix.FindInterfaceMember("in_bus", "nope"); ok {
+		t.Fatalf("expected no location for an unknown member name")
+	}
+}
+
+func TestIndexInterfaceMemberInfo(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "interface in_bus;\n  logic [31:0] hAddr;\nendinterface\n")
+
+	d, ok := ix.InterfaceMemberInfo("in_bus", "hAddr")
+	if !ok || d.Kind != KindVariable || d.Detail != "logic [31:0]" {
+		t.Fatalf("InterfaceMemberInfo(in_bus, hAddr) = %+v, %v", d, ok)
 	}
 }
 
@@ -1050,6 +1146,33 @@ endmodule
 	for _, l := range locs {
 		if l.URI != "file:///a.sv" {
 			t.Fatalf("expected only file:///a.sv occurrences, got %+v", locs)
+		}
+	}
+}
+
+func TestScopedOccurrencesRestrictsInstanceNameToItsOwnModule(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", `module leaf;
+endmodule
+module mod_a;
+  leaf u_leaf();
+  assign u_leaf.x = 1;
+endmodule
+module mod_b;
+  leaf u_leaf();
+  assign u_leaf.x = 1;
+endmodule
+`)
+
+	// "u_leaf" at mod_a's usage site (line 4) must resolve to mod_a's own
+	// instance -- not mod_b's identically-named, unrelated instance.
+	locs := ix.ScopedOccurrences("file:///a.sv", 4, 10, "u_leaf", "", false)
+	if len(locs) != 2 {
+		t.Fatalf("expected 2 occurrences (declaration + usage) within mod_a only, got %+v", locs)
+	}
+	for _, l := range locs {
+		if l.Line != 3 && l.Line != 4 {
+			t.Fatalf("expected occurrences only on mod_a's own lines (3, 4), got %+v", locs)
 		}
 	}
 }

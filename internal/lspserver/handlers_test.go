@@ -1180,6 +1180,46 @@ func TestTextDocumentCompletionStructMemberFallsBackToNilWhenReceiverIsNotAStruc
 	}
 }
 
+// Completion after an interface-typed instance's "." should offer the
+// interface's own signal names, the same way a struct-typed receiver's
+// fields already do -- the completion half of
+// interface-instance-member-goto-completion-unresolvable.md.
+func TestTextDocumentCompletionSuggestsInterfaceMembers(t *testing.T) {
+	s := newTestServer()
+	uri := "file:///a.sv"
+	src := "interface in_bus;\n  logic [31:0] hAddr;\n  logic hWrite;\n  modport mo_master (output hAddr, output hWrite);\nendinterface\n" +
+		"module top (\n  in_bus.mo_master uin_Bus\n);\n" +
+		"  uin_Bus.\n" +
+		"endmodule\n"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+
+	// "  uin_Bus." on line 8 ends at character 10 (right after the dot).
+	line := "  uin_Bus."
+	result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: 8, Character: protocol.UInteger(len(line))},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentCompletion: %v", err)
+	}
+	items, ok := result.([]protocol.CompletionItem)
+	if !ok || len(items) != 2 {
+		t.Fatalf("expected exactly 2 interface-member items, got %#v", result)
+	}
+	if items[0].Label != "hAddr" || items[1].Label != "hWrite" {
+		t.Fatalf("expected [hAddr, hWrite], got [%s, %s]", items[0].Label, items[1].Label)
+	}
+	if items[0].Detail == nil || *items[0].Detail != "logic [31:0]" {
+		t.Fatalf("expected hAddr detail \"logic [31:0]\", got %+v", items[0].Detail)
+	}
+}
+
 func TestTextDocumentCompletionSuggestsStructMembersForIncludedPackageType(t *testing.T) {
 	// The receiver's type is declared in a header included into a package
 	// body, so its Declaration lives in the header's bucket with no
@@ -1456,6 +1496,83 @@ func TestTextDocumentDefinitionOnStructFieldGoesToTheFieldNotASameNamedPort(t *t
 	}
 	if locs[0].URI != "file:///pkg_types.sv" || locs[0].Range.Start.Line != 2 {
 		t.Fatalf("expected the field's own declaration, got %+v", locs[0])
+	}
+}
+
+// Goto-definition on the signal half of an interface-typed instance's
+// member access (uin_Bus.hAddr) must land on that interface's own signal
+// declaration, not a same-named port/variable elsewhere -- the gap
+// interface-instance-member-goto-completion-unresolvable.md reports.
+func TestTextDocumentDefinitionOnInterfaceMemberGoesToItsOwnInterfaceNotASameNamedSignalElsewhere(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_bus.sv", "interface in_bus;\n  logic [31:0] hAddr;\n  modport mo_master (output hAddr);\nendinterface\n")
+	openDoc(t, s, "file:///unrelated.sv", "module mod_unrelated (\n  input logic [31:0] hAddr\n);\nendmodule\n")
+	openDoc(t, s, "file:///top.sv", "module top (\n  in_bus.mo_master uin_Bus\n);\n  logic [31:0] tmp;\n  assign tmp = uin_Bus.hAddr;\nendmodule\n")
+
+	line := "  assign tmp = uin_Bus.hAddr;"
+	fieldChar := strings.LastIndex(line, "hAddr")
+	locs := definitionAt(t, s, "file:///top.sv", 4, fieldChar)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///in_bus.sv" || locs[0].Range.Start.Line != 1 {
+		t.Fatalf("expected in_bus's own hAddr declaration, got %+v", locs[0])
+	}
+}
+
+// Goto-definition on the modport-qualifier half of an interface port
+// (in_Apb.mo_slave) must land on that interface's own modport
+// declaration, not a same-named modport on an unrelated interface --
+// mo_slave/mo_master are near-universal modport names, so this collision
+// is the common case, not an edge case.
+func TestTextDocumentDefinitionOnModportGoesToItsOwnInterfaceNotASameNamedModportElsewhere(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_apb.sv", "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n")
+	openDoc(t, s, "file:///in_other.sv", "interface in_Other;\n  logic sig;\n  modport mo_slave (input sig);\nendinterface\n")
+	openDoc(t, s, "file:///leaf.sv", "module leaf (\n  in_Apb.mo_slave uin_Apb\n);\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///leaf.sv", 1, 11)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///in_apb.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("expected in_Apb's own modport declaration, got %+v", locs[0])
+	}
+}
+
+// The same DotReceiverAt mechanism should resolve a modport qualifier on
+// a virtual interface handle's type ("virtual IfaceName.modport
+// handle;"), not just an ANSI interface port -- confirmed rather than
+// assumed, since it's a different svparse call site
+// (parseVirtualInterfaceDecl) capturing the qualifier.
+func TestTextDocumentDefinitionOnVirtualInterfaceHandleModport(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_apb.sv", "interface in_Apb;\n  logic apbPSel;\n  modport mo_slave (input apbPSel);\nendinterface\n")
+	openDoc(t, s, "file:///driver.sv", "class driver;\n  virtual in_Apb.mo_slave vif;\nendclass\n")
+
+	line := "  virtual in_Apb.mo_slave vif;"
+	modportChar := strings.Index(line, "mo_slave")
+	locs := definitionAt(t, s, "file:///driver.sv", 1, modportChar)
+	if len(locs) != 1 {
+		t.Fatalf("expected one location, got %+v", locs)
+	}
+	if locs[0].URI != "file:///in_apb.sv" || locs[0].Range.Start.Line != 2 {
+		t.Fatalf("expected in_Apb's own modport declaration, got %+v", locs[0])
+	}
+}
+
+// A dot receiver that resolves but isn't an interface (a plain variable
+// here) must not resolve the word against some unrelated interface's
+// same-named modport -- it falls through to the ordinary path, which
+// finds nothing for a bare "mo_slave" with no scope-chain link here.
+func TestTextDocumentDefinitionModportFallsThroughWhenReceiverIsNotAnInterface(t *testing.T) {
+	s := newTestServer()
+	openDoc(t, s, "file:///in_other.sv", "interface in_Other;\n  logic sig;\n  modport mo_slave (input sig);\nendinterface\n")
+	openDoc(t, s, "file:///consumer.sv", "module consumer;\n  logic sig;\n  assign sig = sig.mo_slave;\nendmodule\n")
+
+	locs := definitionAt(t, s, "file:///consumer.sv", 2, 21)
+	if len(locs) != 0 {
+		t.Fatalf("expected no location for a non-interface receiver, got %+v", locs)
 	}
 }
 

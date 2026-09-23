@@ -48,6 +48,14 @@ const (
 	KindPort      Kind = "port"
 	KindVariable  Kind = "variable"
 	KindParameter Kind = "parameter"
+
+	// KindModport is a leaf too, but unlike KindPort/KindVariable/
+	// KindParameter it's never resolvable via the ordinary scope-chain
+	// walk at all -- it's only ever reached as a specific interface's own
+	// child, via Index.FindModport/ModportInfo (mirroring
+	// FindInstantiationPort's "resolve the container by name, then look
+	// up its child" shape for a named-port connection).
+	KindModport Kind = "modport"
 )
 
 // ContainerKinds are the declaration kinds that can hold other
@@ -423,11 +431,13 @@ func recordMemberLink(links *[]memberLink, containerURI string, containerIdx int
 // and a specific-member import names an existing declaration, not a new
 // one) -- instead it's appended to impBuckets[uri] as an importDecl side
 // channel, consulted only by Index's import-based resolution step. An
-// *ast.Instantiation is handled the same way: its named connections/
-// overrides are appended to connBuckets[uri] as connectionSite side
-// channels, consulted only by Index's instantiation-connection scoping
-// (find-references/rename). Remaining node kinds with no useful
-// representation in any model (constraints) are still silently skipped.
+// *ast.Instantiation gets a leaf Declaration per instance for its own name
+// (so goto-definition/hover/rename on a usage site resolve like any other
+// local name), plus its named connections/overrides appended to
+// connBuckets[uri] as connectionSite side channels, consulted only by
+// Index's instantiation-connection scoping (find-references/rename).
+// Remaining node kinds with no useful representation in any model
+// (constraints) are still silently skipped.
 func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaration, impBuckets map[string][]importDecl, connBuckets map[string][]connectionSite, links *[]memberLink) {
 	switch n := d.(type) {
 	case *ast.Container:
@@ -563,11 +573,31 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Default: joinTokenText(n.Default),
 		})
 
+	case *ast.Modport:
+		// Reached via walkDecls(n.Body, ...) from the *ast.Container case
+		// above -- parent is already the enclosing interface's own index,
+		// so this needs no special parenting step, same as KindPort.
+		appendDecl(buckets, uri, Declaration{
+			Kind: KindModport, Name: n.Name,
+			Line: n.Line, Character: n.Character,
+			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
+			Parent: parent,
+			Detail: modportDetail(n.Ports),
+		})
+
 	case *ast.Import:
 		impBuckets[uri] = append(impBuckets[uri], importDecl{Package: n.Package, Member: n.Member, Parent: parent})
 
 	case *ast.Instantiation:
 		for _, inst := range n.Instances {
+			appendDecl(buckets, uri, Declaration{
+				Kind: KindVariable, Name: inst.Name,
+				Line: inst.Line, Character: inst.Character,
+				EndLine: inst.Line, EndCharacter: inst.Character + UTF16Len(inst.Name),
+				Parent:   parent,
+				Detail:   n.ModuleType,
+				TypeName: n.ModuleType,
+			})
 			for _, conn := range inst.Connections {
 				if conn.Name == "" || conn.Wildcard {
 					continue // positional or ".*" -- no specific name to attribute
@@ -670,6 +700,22 @@ func portDetail(dir ast.Direction, t ast.Type) string {
 		parts = append(parts, typeText)
 	}
 	return strings.Join(parts, " ")
+}
+
+// modportDetail renders a modport's port list for hover display, e.g.
+// "input req, output gnt" -- portDetail's direction-then-name shape one
+// level removed, since a modport port has no type of its own, only a
+// direction and the name of a signal it exposes.
+func modportDetail(ports []ast.ModportPort) string {
+	parts := make([]string, 0, len(ports))
+	for _, p := range ports {
+		if p.Direction != ast.DirUnspecified {
+			parts = append(parts, string(p.Direction)+" "+p.Name)
+		} else {
+			parts = append(parts, p.Name)
+		}
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatType renders t as a human-readable string (e.g. "logic [7:0]",

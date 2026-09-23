@@ -1826,6 +1826,136 @@ func (ix *Index) InstantiationPortInfo(moduleName, portName string) (Declaration
 	return ix.byURI[ref.uri][ref.idx], true
 }
 
+// lookupModportRefsLocked resolves modportName against interfaceName's own
+// modports -- the same "find container by name globally, then its
+// children" shape as lookupInstantiationPortRefsLocked, restricted to
+// KindInterface (a modport can only ever belong to an interface, unlike an
+// instantiation port/param lookup which spans module/interface/program).
+func (ix *Index) lookupModportRefsLocked(interfaceName, modportName string) ([]declRef, bool) {
+	var out []declRef
+	for _, qref := range ix.byName[interfaceName] {
+		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+			continue
+		}
+		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, modportName)...)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// FindModport resolves modportName against interfaceName's own modport
+// declarations -- goto-definition/declaration for the modport-qualifier
+// half of "IfaceName.modport", e.g. an interface port's type header or a
+// virtual interface handle's type. Mirrors FindInstantiationPort.
+func (ix *Index) FindModport(interfaceName, modportName string) ([]Location, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	refs, ok := ix.lookupModportRefsLocked(interfaceName, modportName)
+	if !ok {
+		return nil, false
+	}
+	return ix.locationsLocked(refs), true
+}
+
+// ModportInfo is FindModport's hover counterpart, mirroring
+// InstantiationPortInfo.
+func (ix *Index) ModportInfo(interfaceName, modportName string) (Declaration, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	refs, ok := ix.lookupModportRefsLocked(interfaceName, modportName)
+	if !ok {
+		return Declaration{}, false
+	}
+	ref := ix.primaryRefLocked(refs)
+	return ix.byURI[ref.uri][ref.idx], true
+}
+
+// lookupInterfaceMemberRefsLocked resolves memberName against
+// interfaceName's own member declarations -- the receiver-instance-typed
+// counterpart to lookupModportRefsLocked's receiver-type-typed lookup
+// (an interface-typed port/variable's TypeName names the interface itself,
+// exactly like a struct-typed one names its typedef). Unlike a struct/union
+// field, an interface's own signals are already indexed as ordinary child
+// Declarations (KindVariable/KindPort, see scan.go's *ast.Variable case),
+// so this is childRefsLocked applied the same way
+// lookupInstantiationPortRefsLocked and lookupModportRefsLocked already
+// apply it, with no flattening step needed first.
+func (ix *Index) lookupInterfaceMemberRefsLocked(interfaceName, memberName string) ([]declRef, bool) {
+	var out []declRef
+	for _, qref := range ix.byName[interfaceName] {
+		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+			continue
+		}
+		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, memberName)...)
+	}
+	if len(out) == 0 {
+		return nil, false
+	}
+	return out, true
+}
+
+// FindInterfaceMember resolves memberName -- goto-definition/declaration
+// for the signal half of "ifaceInstance.signal", once the instance's own
+// declared type (interfaceName) is known. Mirrors FindModport. Unlike
+// StructFieldLocation's struct/union case, an interface member's own
+// Declaration already carries a real position, so no separate
+// typedef-and-Fields lookup is needed here.
+func (ix *Index) FindInterfaceMember(interfaceName, memberName string) ([]Location, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	refs, ok := ix.lookupInterfaceMemberRefsLocked(interfaceName, memberName)
+	if !ok {
+		return nil, false
+	}
+	return ix.locationsLocked(refs), true
+}
+
+// InterfaceMemberInfo is FindInterfaceMember's hover counterpart, mirroring
+// ModportInfo.
+func (ix *Index) InterfaceMemberInfo(interfaceName, memberName string) (Declaration, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	refs, ok := ix.lookupInterfaceMemberRefsLocked(interfaceName, memberName)
+	if !ok {
+		return Declaration{}, false
+	}
+	ref := ix.primaryRefLocked(refs)
+	return ix.byURI[ref.uri][ref.idx], true
+}
+
+// InterfaceMembers returns interfaceName's own signal-shaped members
+// (KindVariable/KindPort children) rendered as ports, mirroring
+// StructFields' shape -- used for completion after "ifaceInstance." once
+// the receiver's declared type has resolved to an interface, the same way
+// StructFields already backs completion after a struct/union-typed
+// receiver. Modports and any other non-signal child (a nested function/
+// task, a parameter) are deliberately excluded: they aren't what
+// "ifaceInstance.word" ever refers to.
+func (ix *Index) InterfaceMembers(interfaceName string) ([]Port, bool) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	found := false
+	var ports []Port
+	for _, qref := range ix.byName[interfaceName] {
+		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+			continue
+		}
+		found = true
+		for _, m := range ix.byURI[qref.uri] {
+			if m.Parent != qref.idx {
+				continue
+			}
+			if m.Kind != KindVariable && m.Kind != KindPort {
+				continue
+			}
+			ports = append(ports, Port{Name: m.Name, Detail: m.Detail})
+		}
+	}
+	return ports, found
+}
+
 // lookupSelfRefLocked reports whether (line, character) falls directly
 // within some declaration in uri named word -- resolving a click on a
 // declaration's own name to itself. Deliberately separate from (and
