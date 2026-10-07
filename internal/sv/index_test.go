@@ -2280,3 +2280,16 @@ func TestOccurrencesInFilePackageMemberDropsShadowed(t *testing.T) {
 		t.Errorf("expected only the pkg.sv occurrences, got %+v", locs)
 	}
 }
+
+func TestScopedOccurrencesPackageMemberNestedShadowing(t *testing.T) {
+	ix := NewIndex()
+	// Inside pa, both pa (the target) and class C (its own X) declare X:
+	// the narrower scope decides, so only the use in pa's body is kept.
+	ix.SetFile("file:///pkg.sv", "package pa;\n  localparam int X = 1;\n  localparam int Y = X;\n"+
+		"  class C;\n    int X;\n    function int f();\n      return X;\n    endfunction\n  endclass\nendpackage\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))["file:///pkg.sv"]
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("expected pkg.sv lines 1 and 2 only, got %v", got)
+	}
+}

@@ -129,6 +129,22 @@ func BenchmarkReferencesPort(b *testing.B) {
 	}
 }
 
+// A package typedef used by bare name (through import) in every module:
+// the package-member filter runs over every one of those occurrences.
+func BenchmarkReferencesPackageMember(b *testing.B) {
+	s, probe := benchWorkspace(b)
+	params := &protocol.ReferenceParams{
+		TextDocumentPositionParams: benchTextDocPos(probe, benchPos(b, benchModule(0), "bus_t")),
+		Context:                    protocol.ReferenceContext{IncludeDeclaration: true},
+	}
+	b.ResetTimer()
+	for range b.N {
+		if _, err := s.TextDocumentReferences(nil, params); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func BenchmarkCompletionPrefix(b *testing.B) {
 	s, probe := benchWorkspace(b)
 	pos := benchPos(b, benchModule(0), "bus_t sig")

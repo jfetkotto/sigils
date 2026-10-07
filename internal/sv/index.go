@@ -1542,19 +1542,12 @@ func (ix *Index) isPackageMemberLocked(ref declRef, d Declaration) bool {
 //  3. it is written "q::name" and q::name resolves, but not to the target
 //     (so q is another package, and any export of the target's package
 //     through q would make q::name resolve to the target and be kept);
-//  4. it is bare and the innermost enclosing scope that declares name at
-//     all declares only something other than the target, which by the
-//     LRM hides any imported or compilation-unit name. The file-scope rung
-//     is deliberately not consulted, since a same-named file-scope
-//     declaration in another file may just be an `ifdef variant.
+//  4. it is bare and shadowed by a local declaration (see
+//     pkgMemberFilter.shadowed).
 //
 // The query position and the declaration site are always kept.
 func (ix *Index) packageMemberOccurrencesLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int, onlyURI string) []Location {
-	targets := make(map[declRef]bool, len(refs))
-	for _, r := range refs {
-		targets[r] = true
-	}
-	d := ix.byURI[primary.uri][primary.idx]
+	f := ix.newPkgMemberFilterLocked(name, refs, primary, qURI, qLine, qChar)
 
 	bucket := ix.occByName[name]
 	uris := make([]string, 0, len(bucket))
@@ -1565,51 +1558,11 @@ func (ix *Index) packageMemberOccurrencesLocked(name string, refs []declRef, pri
 	}
 	sort.Strings(uris)
 
-	type scopeKey struct {
-		uri   string
-		scope int
-	}
-	shadowed := make(map[scopeKey]bool)
-
 	var out []Location
 	for _, u := range uris {
-		var conn map[[2]int]bool
-		if sites := ix.connByName[name][u]; len(sites) > 0 {
-			conn = make(map[[2]int]bool, len(sites))
-			for _, s := range sites {
-				conn[[2]int{s.Line, s.Character}] = true
-			}
-		}
-		decls := ix.byURI[u]
+		conn := ix.connectionPositionsLocked(name, u)
 		for _, occ := range bucket[u] {
-			keep := true
-			switch {
-			case u == qURI && occ.Line == qLine && qChar >= occ.Character && qChar <= occ.Character+len(name):
-			case u == primary.uri && occ.Line == d.Line && occ.Character == d.Character:
-			case conn[[2]int{occ.Line, occ.Character}]:
-				keep = false
-			case occ.Receiver != "":
-				keep = false
-			case occ.Qualifier != "":
-				if qrefs, ok := ix.lookupQualifiedRefsLocked(occ.Qualifier, name); ok {
-					keep = false
-					for _, r := range qrefs {
-						if targets[r] {
-							keep = true
-							break
-						}
-					}
-				}
-			default:
-				key := scopeKey{u, innermostContaining(decls, occ.Line, occ.Character)}
-				sh, seen := shadowed[key]
-				if !seen {
-					sh = ix.shadowedByLocalLocked(u, key.scope, name, targets)
-					shadowed[key] = sh
-				}
-				keep = !sh
-			}
-			if keep {
+			if f.keep(u, occ, conn) {
 				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
 			}
 		}
@@ -1617,29 +1570,140 @@ func (ix *Index) packageMemberOccurrencesLocked(name string, refs []declRef, pri
 	return out
 }
 
-// shadowedByLocalLocked walks outward from container scope in uri and
-// reports whether the first scope declaring name declares none of targets.
-// Finding a target, or nothing at all, reports false: only "found, and
-// provably a different declaration" counts. The file-scope rung is not
-// walked.
-func (ix *Index) shadowedByLocalLocked(uri string, scope int, name string, targets map[declRef]bool) bool {
-	decls := ix.byURI[uri]
-	for idx := scope; idx != -1; idx = decls[idx].Parent {
-		found := false
-		for i, d := range decls {
-			if d.Parent != idx || d.Name != name {
-				continue
-			}
-			if targets[declRef{uri: uri, idx: i}] {
-				return false
-			}
-			found = true
-		}
-		if found {
-			return true
+// connectionPositionsLocked returns the positions of every named
+// connection site called name in uri, or nil when there are none.
+func (ix *Index) connectionPositionsLocked(name, uri string) map[[2]int]bool {
+	sites := ix.connByName[name][uri]
+	if len(sites) == 0 {
+		return nil
+	}
+	out := make(map[[2]int]bool, len(sites))
+	for _, s := range sites {
+		out[[2]int{s.Line, s.Character}] = true
+	}
+	return out
+}
+
+// pkgMemberFilter holds the per-query state packageMemberOccurrencesLocked
+// applies its drop rules with.
+type pkgMemberFilter struct {
+	ix      *Index
+	name    string
+	targets map[declRef]bool
+	// localDecls[uri] lists the indices (into ix.byURI[uri]) of every
+	// declaration named name whose parent is a container: the only
+	// declarations that can shadow the target. Most files have none.
+	localDecls map[string][]int
+	// qualMemo[q] caches qualifiedElsewhere(q).
+	qualMemo map[string]bool
+
+	qURI          string
+	qLine, qChar  int
+	declURI       string
+	declLine      int
+	declCharacter int
+}
+
+func (ix *Index) newPkgMemberFilterLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int) *pkgMemberFilter {
+	d := ix.byURI[primary.uri][primary.idx]
+	f := &pkgMemberFilter{
+		ix:            ix,
+		name:          name,
+		targets:       make(map[declRef]bool, len(refs)),
+		localDecls:    make(map[string][]int),
+		qualMemo:      make(map[string]bool),
+		qURI:          qURI,
+		qLine:         qLine,
+		qChar:         qChar,
+		declURI:       primary.uri,
+		declLine:      d.Line,
+		declCharacter: d.Character,
+	}
+	for _, r := range refs {
+		f.targets[r] = true
+	}
+	for _, r := range ix.byName[name] {
+		decls := ix.byURI[r.uri]
+		if p := decls[r.idx].Parent; p != -1 && containerKinds[decls[p].Kind] {
+			f.localDecls[r.uri] = append(f.localDecls[r.uri], r.idx)
 		}
 	}
-	return false
+	return f
+}
+
+// keep applies the drop rules to one occurrence in uri; conn is uri's
+// connectionPositionsLocked.
+func (f *pkgMemberFilter) keep(uri string, occ Occurrence, conn map[[2]int]bool) bool {
+	if f.isAnchor(uri, occ) {
+		return true
+	}
+	if conn[[2]int{occ.Line, occ.Character}] {
+		return false
+	}
+	if occ.Receiver != "" {
+		return false
+	}
+	if occ.Qualifier != "" {
+		return !f.qualifiedElsewhere(occ.Qualifier)
+	}
+	return !f.shadowed(uri, occ)
+}
+
+// isAnchor reports whether occ is the query position or the target's own
+// declaration site, which are never dropped.
+func (f *pkgMemberFilter) isAnchor(uri string, occ Occurrence) bool {
+	if uri == f.qURI && occ.Line == f.qLine && f.qChar >= occ.Character && f.qChar <= occ.Character+len(f.name) {
+		return true
+	}
+	return uri == f.declURI && occ.Line == f.declLine && occ.Character == f.declCharacter
+}
+
+// qualifiedElsewhere reports whether qualifier::name resolves, and to
+// nothing that is a target.
+func (f *pkgMemberFilter) qualifiedElsewhere(qualifier string) bool {
+	if v, ok := f.qualMemo[qualifier]; ok {
+		return v
+	}
+	refs, ok := f.ix.lookupQualifiedRefsLocked(qualifier, f.name)
+	v := ok && !slices.ContainsFunc(refs, func(r declRef) bool { return f.targets[r] })
+	f.qualMemo[qualifier] = v
+	return v
+}
+
+// shadowed reports whether a bare occ is hidden by a local declaration:
+// the innermost enclosing scope that declares name at all declares only
+// something other than the target, which by the LRM hides any imported
+// or compilation-unit name. Finding a target there, or no such scope,
+// reports false.
+//
+// That innermost scope is the narrowest container parenting one of
+// localDecls that contains occ, the same answer a walk up occ's scope
+// chain gives, without scanning the file's declarations. The file-scope
+// rung is deliberately not consulted (localDecls excludes it), since a
+// same-named file-scope declaration in another file may just be an
+// `ifdef variant.
+func (f *pkgMemberFilter) shadowed(uri string, occ Occurrence) bool {
+	cands := f.localDecls[uri]
+	if len(cands) == 0 {
+		return false
+	}
+	decls := f.ix.byURI[uri]
+	scope := -1
+	for _, i := range cands {
+		p := decls[i].Parent
+		if posWithin(decls[p], occ.Line, occ.Character) && (scope == -1 || narrower(decls[p], decls[scope])) {
+			scope = p
+		}
+	}
+	if scope == -1 {
+		return false
+	}
+	for _, i := range cands {
+		if decls[i].Parent == scope && f.targets[declRef{uri: uri, idx: i}] {
+			return false
+		}
+	}
+	return true
 }
 
 // containerScopeLocked returns d's enclosing container and whether it's
