@@ -48,6 +48,11 @@ type Server struct {
 	// the client, so an unchanged list isn't sent again. See
 	// publishDiagnostics.
 	published map[string]string
+
+	// tokMu guards tokens, the lexed form of each open document -- see
+	// tokensFor.
+	tokMu  sync.Mutex
+	tokens map[string]cachedTokens
 }
 
 func NewServer(log commonlog.Logger) *Server {
@@ -56,6 +61,7 @@ func NewServer(log commonlog.Logger) *Server {
 		docs:      document.NewStore(),
 		index:     sv.NewIndex(),
 		published: make(map[string]string),
+		tokens:    make(map[string]cachedTokens),
 	}
 }
 

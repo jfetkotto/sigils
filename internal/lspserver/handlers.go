@@ -185,6 +185,7 @@ func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.D
 func (s *Server) TextDocumentDidClose(context *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
 	uri := params.TextDocument.URI
 	s.docs.Close(document.URI(uri))
+	s.forgetTokens(uri)
 	s.Log.Infof("closed %s", uri)
 
 	// Deliberately not removing the file from s.index: it still exists on
@@ -259,7 +260,7 @@ func (s *Server) resolveWordAt(
 	}
 	line, character := int(position.Line), int(position.Character)
 
-	toks := sv.Lex(text) // lexed once, shared by every probe below -- see sv.Tokens
+	toks := s.tokensFor(uri, text) // shared by every probe below -- see sv.Tokens
 
 	if path, inDirective, ok := sv.IncludePathIn(toks, line, character); inDirective {
 		if !ok {
@@ -451,7 +452,7 @@ func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.
 	}
 	line, character := int(params.Position.Line), int(params.Position.Character)
 
-	toks := sv.Lex(text) // lexed once, shared by both context probes below -- see sv.Tokens
+	toks := s.tokensFor(params.TextDocument.URI, text) // shared by both context probes below -- see sv.Tokens
 	if moduleName, connected, ok := sv.InstantiationContextIn(toks, line, character); ok {
 		var items []protocol.CompletionItem
 		if ports, ok := s.index.Ports(moduleName); ok {
