@@ -58,6 +58,9 @@ func (d *FilelistDiscoverer) Roots(ctx context.Context) ([]Root, error) {
 // source file they reach, deduplicated by resolved path. It also captures
 // the filelists visited and the +incdir+ and +define+ entries seen, for
 // VisitedFilelists, IncludeDirs and Defines.
+//
+// A cancelled ctx stops the walk between filelist lines and returns
+// ctx.Err(), leaving what the previous call captured in place.
 func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile, error) {
 	st := &discoveryState{
 		seenFilelists:   make(map[string]bool),
@@ -67,7 +70,10 @@ func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile
 	}
 
 	for _, rel := range d.cfg.Filelists {
-		d.expand(filepath.Join(root.Path, rel), st)
+		d.expand(ctx, filepath.Join(root.Path, rel), st)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	visited := make([]string, 0, len(st.seenFilelists))
@@ -123,7 +129,10 @@ func (d *FilelistDiscoverer) VisitedFilelists() []string {
 	return slices.Clone(d.visited)
 }
 
-func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
+func (d *FilelistDiscoverer) expand(ctx context.Context, path string, st *discoveryState) {
+	if ctx.Err() != nil {
+		return
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		d.warnf("could not resolve filelist %s: %s", path, err)
@@ -145,6 +154,9 @@ func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
 	dir := filepath.Dir(path)
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
@@ -193,7 +205,7 @@ func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
 		}
 
 		if treatAsFilelist || filelistExtensions[strings.ToLower(filepath.Ext(entry))] {
-			d.expand(entry, st)
+			d.expand(ctx, entry, st)
 			continue
 		}
 
