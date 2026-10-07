@@ -115,6 +115,10 @@ type Index struct {
 	mu     sync.RWMutex
 	byURI  map[string][]Declaration
 	byName map[string][]declRef
+	// files[uri] is byURI[uri] plus the per-file lookups resolution uses
+	// (see fileDecls), kept in step with byURI by SetFile and
+	// removeDeclarationsLocked.
+	files map[string]*fileDecls
 	// occByName[name][uri] holds every occurrence of name in uri.
 	occByName map[string]map[string][]Occurrence
 	// occNamesByURI[uri] lists the distinct identifier names occurring in
@@ -217,6 +221,7 @@ func NewIndex() *Index {
 	return &Index{
 		byURI:            make(map[string][]Declaration),
 		byName:           make(map[string][]declRef),
+		files:            make(map[string]*fileDecls),
 		occByName:        make(map[string]map[string][]Occurrence),
 		occNamesByURI:    make(map[string][]string),
 		dependsOn:        make(map[string][]string),
@@ -307,6 +312,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		touched[fileURI] = true
 		ix.removeDeclarationsLocked(fileURI)
 		ix.byURI[fileURI] = decls
+		ix.files[fileURI] = newFileDecls(decls)
 		for i := range decls {
 			d := &decls[i]
 			ix.byName[d.Name] = append(ix.byName[d.Name], declRef{uri: fileURI, idx: i})
@@ -614,6 +620,16 @@ func (ix *Index) removeDeclarationsLocked(uri string) {
 		}
 	}
 	delete(ix.byURI, uri)
+	delete(ix.files, uri)
+}
+
+// fileLocked returns uri's fileDecls, or an empty one if the index holds
+// no declarations for uri.
+func (ix *Index) fileLocked(uri string) *fileDecls {
+	if f := ix.files[uri]; f != nil {
+		return f
+	}
+	return emptyFileDecls
 }
 
 // indexConnectionsLocked rebuilds uri's slice of connByName, retracting
@@ -1006,15 +1022,15 @@ func (ix *Index) importVisibleAtLocked(imp importDecl, ancestors map[int]bool) b
 // ancestorScopesLocked returns every container index enclosing (line,
 // character) in uri.
 //
-// Computed once per request rather than per import: innermostContaining is
-// an O(declarations-in-file) scan and the chain walk another, and
-// importVisibleAtLocked used to redo both for every import statement in
-// the file. A UVM-style file with 30 imports and 3,000 declarations did
-// that work 30 times over for one identical answer.
+// Computed once per request rather than per import: the container search
+// and the chain walk are the same for every import statement in the file,
+// and importVisibleAtLocked used to redo both for each one. A UVM-style
+// file with 30 imports did that work 30 times over for one identical
+// answer.
 func (ix *Index) ancestorScopesLocked(uri string, line, character int) map[int]bool {
-	decls := ix.byURI[uri]
+	f := ix.fileLocked(uri)
 	out := make(map[int]bool)
-	for idx := innermostContaining(decls, line, character); idx != -1; idx = decls[idx].Parent {
+	for idx := f.innermostContaining(line, character); idx != -1; idx = f.decls[idx].Parent {
 		out[idx] = true
 	}
 	return out
@@ -1301,11 +1317,12 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 
 	var out []Location
 	for _, u := range uris {
+		f := ix.fileLocked(u)
 		for _, occ := range bucket[u] {
 			var keep bool
 			switch {
 			case occ.Receiver != "":
-				key := receiverKey{u, occ.Receiver, innermostContaining(ix.byURI[u], occ.Line, occ.Character)}
+				key := receiverKey{u, occ.Receiver, f.innermostContaining(occ.Line, occ.Character)}
 				t, seen := memo[key]
 				if !seen {
 					t, _ = ix.receiverTypeNameLocked(u, occ.Line, occ.Character, occ.Receiver, "", false)
@@ -1967,9 +1984,9 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 // members of the same package scope, so both are found here.
 func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []declRef {
 	var out []declRef
-	decls := ix.byURI[uri]
-	for i := range decls {
-		if d := &decls[i]; d.Parent == containerIdx && d.Name == name {
+	f := ix.fileLocked(uri)
+	for _, i := range f.named(name) {
+		if f.decls[i].Parent == containerIdx {
 			out = append(out, declRef{uri: uri, idx: i})
 		}
 	}
@@ -1977,13 +1994,12 @@ func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []de
 		if !ix.containerStillNamedLocked(uri, containerIdx, l.ContainerName) {
 			continue
 		}
-		included := ix.byURI[l.IncludedURI]
-		for i := range included {
-			d := &included[i]
+		included := ix.fileLocked(l.IncludedURI)
+		for _, i := range included.named(name) {
 			// Only file scope: nesting *within* the included file is
 			// tracked normally, so a typedef inside a class inside the
 			// header is that class's child, not the container's.
-			if d.Parent != -1 || d.Name != name {
+			if included.decls[i].Parent != -1 {
 				continue
 			}
 			// The same header included by two different files yields two
@@ -2293,9 +2309,9 @@ func (ix *Index) InterfaceMembers(interfaceName string) ([]Port, bool) {
 // *child* of some enclosing container -- it has no path to a match for a
 // declaration that has no enclosing container of its own at all.
 func (ix *Index) lookupSelfRefLocked(uri string, line, character int, word string) ([]declRef, bool) {
-	decls := ix.byURI[uri]
-	for i := range decls {
-		if d := &decls[i]; d.Name == word && posWithin(d, line, character) {
+	f := ix.fileLocked(uri)
+	for _, i := range f.named(word) {
+		if posWithin(&f.decls[i], line, character) {
 			return []declRef{{uri: uri, idx: i}}, true
 		}
 	}
@@ -2308,44 +2324,25 @@ func (ix *Index) lookupSelfRefLocked(uri string, line, character int, word strin
 // both "file scope" and the loop's terminator, so a file-scope typedef
 // used inside a module in the same file would otherwise never match.
 func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name string) ([]declRef, bool) {
-	decls := ix.byURI[uri]
-	idx := innermostContaining(decls, line, character)
+	f := ix.fileLocked(uri)
+	named := f.named(name)
+	idx := f.innermostContaining(line, character)
 	for idx != -1 {
 		var out []declRef
-		for i := range decls {
-			d := &decls[i]
-			if d.Parent == idx && d.Name == name {
+		for _, i := range named {
+			if f.decls[i].Parent == idx {
 				out = append(out, declRef{uri: uri, idx: i})
 			}
 		}
 		if len(out) > 0 {
 			return out, true
 		}
-		idx = decls[idx].Parent
+		idx = f.decls[idx].Parent
 	}
 	if out := ix.childRefsLocked(uri, -1, name); len(out) > 0 {
 		return out, true
 	}
 	return nil, false
-}
-
-// innermostContaining returns the index of the smallest container
-// declaration whose span contains (line, character), or -1 if none does.
-func innermostContaining(decls []Declaration, line, character int) int {
-	best := -1
-	for i := range decls {
-		d := &decls[i]
-		if !containerKinds[d.Kind] {
-			continue
-		}
-		if !posWithin(d, line, character) {
-			continue
-		}
-		if best == -1 || narrower(d, &decls[best]) {
-			best = i
-		}
-	}
-	return best
 }
 
 func posWithin(d *Declaration, line, character int) bool {
