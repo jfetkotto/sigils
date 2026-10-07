@@ -65,6 +65,59 @@ type Occurrence struct {
 	Character int
 }
 
+// occurrence is how the index stores an Occurrence: occByName is keyed by
+// the name, so the name itself isn't repeated, and Receiver, Qualifier and
+// NamedArg share one field, since the token before an identifier is a "."
+// after an identifier, a "::", or a "." after "(" or "," -- never more than
+// one of them. That takes one occurrence from 72 bytes to 32, and the index
+// holds one for every identifier token in the workspace.
+type occurrence struct {
+	prefix          string // the receiver or qualifier, per kind
+	line, character int32
+	kind            occurrenceKind
+}
+
+type occurrenceKind uint8
+
+const (
+	occPlain occurrenceKind = iota
+	occReceiver
+	occQualifier
+	occNamedArg
+)
+
+func (o Occurrence) stored() occurrence {
+	s := occurrence{line: int32(o.Line), character: int32(o.Character)}
+	switch {
+	case o.Receiver != "":
+		s.kind, s.prefix = occReceiver, o.Receiver
+	case o.Qualifier != "":
+		s.kind, s.prefix = occQualifier, o.Qualifier
+	case o.NamedArg:
+		s.kind = occNamedArg
+	}
+	return s
+}
+
+// receiver is Occurrence.Receiver.
+func (o occurrence) receiver() string {
+	if o.kind == occReceiver {
+		return o.prefix
+	}
+	return ""
+}
+
+// qualifier is Occurrence.Qualifier.
+func (o occurrence) qualifier() string {
+	if o.kind == occQualifier {
+		return o.prefix
+	}
+	return ""
+}
+
+// namedArg is Occurrence.NamedArg.
+func (o occurrence) namedArg() bool { return o.kind == occNamedArg }
+
 // declRef points at one Declaration within Index.byURI, letting the index
 // cross-reference a name to its full Declaration (including Parent, for
 // walking the scope chain) without duplicating it.
@@ -120,7 +173,7 @@ type Index struct {
 	// removeDeclarationsLocked.
 	files map[string]*fileDecls
 	// occByName[name][uri] holds every occurrence of name in uri.
-	occByName map[string]map[string][]Occurrence
+	occByName map[string]map[string][]occurrence
 	// occNamesByURI[uri] lists the distinct identifier names occurring in
 	// uri, so removeLocked can clear a file's buckets in O(distinct names).
 	occNamesByURI map[string][]string
@@ -222,7 +275,7 @@ func NewIndex() *Index {
 		byURI:            make(map[string][]Declaration),
 		byName:           make(map[string][]declRef),
 		files:            make(map[string]*fileDecls),
-		occByName:        make(map[string]map[string][]Occurrence),
+		occByName:        make(map[string]map[string][]occurrence),
 		occNamesByURI:    make(map[string][]string),
 		dependsOn:        make(map[string][]string),
 		dependedOnBy:     make(map[string]map[string]bool),
@@ -299,9 +352,9 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 
 	// Group occurrences by name outside the lock; occurrencesFromSVParseTokens
 	// already interned each name to a single string per file.
-	perName := make(map[string][]Occurrence)
+	perName := make(map[string][]occurrence)
 	for _, o := range occs {
-		perName[o.Name] = append(perName[o.Name], o)
+		perName[o.Name] = append(perName[o.Name], o.stored())
 	}
 
 	ix.mu.Lock()
@@ -350,7 +403,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	for name, list := range perName {
 		bucket := ix.occByName[name]
 		if bucket == nil {
-			bucket = make(map[string][]Occurrence)
+			bucket = make(map[string][]occurrence)
 			ix.occByName[name] = bucket
 		}
 		bucket[uri] = list
@@ -1321,11 +1374,11 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 		for _, occ := range bucket[u] {
 			var keep bool
 			switch {
-			case occ.Receiver != "":
-				key := receiverKey{u, occ.Receiver, f.innermostContaining(occ.Line, occ.Character)}
+			case occ.receiver() != "":
+				key := receiverKey{u, occ.receiver(), f.innermostContaining(int(occ.line), int(occ.character))}
 				t, seen := memo[key]
 				if !seen {
-					t, _ = ix.receiverTypeNameLocked(u, occ.Line, occ.Character, occ.Receiver, "", false)
+					t, _ = ix.receiverTypeNameLocked(u, int(occ.line), int(occ.character), occ.receiver(), "", false)
 					memo[key] = t
 				}
 				keep = t != "" && t == typeName
@@ -1336,10 +1389,10 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 				// has -- a struct body pulled in across an `include boundary
 				// therefore won't match here, the same cross-file gap
 				// Declaration.Fields has generally.
-				keep = occ.Line == decl.Line && occ.Character == decl.Character
+				keep = int(occ.line) == decl.Line && int(occ.character) == decl.Character
 			}
 			if keep {
-				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+				out = append(out, Location{URI: u, Line: int(occ.line), Character: int(occ.character)})
 			}
 		}
 	}
@@ -1430,10 +1483,10 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 
 	var out []Location
 	for _, occ := range ix.occByName[word][uri] {
-		if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+		if !posWithinBounds(int(occ.line), int(occ.character), container.Line, container.Character, container.EndLine, container.EndCharacter) {
 			continue
 		}
-		out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: uri, Line: int(occ.line), Character: int(occ.character)})
 	}
 	out = append(out, ix.connectionOccurrencesInFileLocked(ref.uri, d, word, uri)...)
 	return append(out, ix.namedArgOccurrencesInFileLocked(ref.uri, d, container, word, uri)...)
@@ -1464,7 +1517,7 @@ func (ix *Index) occurrencesInFileLocked(name, uri string) []Location {
 	occs := ix.occByName[name][uri]
 	out := make([]Location, 0, len(occs))
 	for _, occ := range occs {
-		out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: uri, Line: int(occ.line), Character: int(occ.character)})
 	}
 	return out
 }
@@ -1486,7 +1539,7 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 	out := make([]Location, 0, total)
 	for _, uri := range uris {
 		for _, occ := range bucket[uri] {
-			out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
+			out = append(out, Location{URI: uri, Line: int(occ.line), Character: int(occ.character)})
 		}
 	}
 	return out
@@ -1558,16 +1611,16 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	var out []Location
 	conn := ix.connectionPositionsLocked(word, ref.uri)
 	for _, occ := range ix.occByName[word][ref.uri] {
-		if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+		if !posWithinBounds(int(occ.line), int(occ.character), container.Line, container.Character, container.EndLine, container.EndCharacter) {
 			continue
 		}
 		// A ".name(" connection token names the instantiated module's
 		// port/parameter, not this declaration; connectionOccurrencesLocked
 		// re-adds the ones that really target it.
-		if conn[[2]int{occ.Line, occ.Character}] {
+		if conn[[2]int{int(occ.line), int(occ.character)}] {
 			continue
 		}
-		out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: ref.uri, Line: int(occ.line), Character: int(occ.character)})
 	}
 	if d.Kind == KindPort || d.Kind == KindParameter {
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, word, d.Kind)...)
@@ -1621,13 +1674,13 @@ func (ix *Index) namedArgOccurrencesLocked(subURI string, sub *Declaration, name
 	for _, u := range uris {
 		conn := ix.connectionPositionsLocked(name, u)
 		for _, occ := range bucket[u] {
-			if !occ.NamedArg || conn[[2]int{occ.Line, occ.Character}] {
+			if !occ.namedArg() || conn[[2]int{int(occ.line), int(occ.character)}] {
 				continue
 			}
-			if u == subURI && posWithinBounds(occ.Line, occ.Character, sub.Line, sub.Character, sub.EndLine, sub.EndCharacter) {
+			if u == subURI && posWithinBounds(int(occ.line), int(occ.character), sub.Line, sub.Character, sub.EndLine, sub.EndCharacter) {
 				continue // already in the span result
 			}
-			out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+			out = append(out, Location{URI: u, Line: int(occ.line), Character: int(occ.character)})
 		}
 	}
 	return out
@@ -1687,7 +1740,7 @@ func (ix *Index) filteredOccurrencesLocked(name string, refs []declRef, primary 
 		conn := ix.connectionPositionsLocked(name, u)
 		for _, occ := range bucket[u] {
 			if f.keep(u, occ, conn) {
-				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+				out = append(out, Location{URI: u, Line: int(occ.line), Character: int(occ.character)})
 			}
 		}
 	}
@@ -1757,29 +1810,29 @@ func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary 
 
 // keep applies the drop rules to one occurrence in uri; conn is uri's
 // connectionPositionsLocked.
-func (f *occurrenceFilter) keep(uri string, occ Occurrence, conn map[[2]int]bool) bool {
+func (f *occurrenceFilter) keep(uri string, occ occurrence, conn map[[2]int]bool) bool {
 	if f.isAnchor(uri, occ) {
 		return true
 	}
-	if conn[[2]int{occ.Line, occ.Character}] {
+	if conn[[2]int{int(occ.line), int(occ.character)}] {
 		return false
 	}
-	if occ.Receiver != "" {
+	if occ.receiver() != "" {
 		return false
 	}
-	if occ.Qualifier != "" {
-		return !f.qualifiedElsewhere(occ.Qualifier)
+	if occ.qualifier() != "" {
+		return !f.qualifiedElsewhere(occ.qualifier())
 	}
 	return !f.shadowed(uri, occ)
 }
 
 // isAnchor reports whether occ is the query position or the target's own
 // declaration site, which are never dropped.
-func (f *occurrenceFilter) isAnchor(uri string, occ Occurrence) bool {
-	if uri == f.qURI && occ.Line == f.qLine && f.qChar >= occ.Character && f.qChar <= occ.Character+len(f.name) {
+func (f *occurrenceFilter) isAnchor(uri string, occ occurrence) bool {
+	if uri == f.qURI && int(occ.line) == f.qLine && f.qChar >= int(occ.character) && f.qChar <= int(occ.character)+len(f.name) {
 		return true
 	}
-	return uri == f.declURI && occ.Line == f.declLine && occ.Character == f.declCharacter
+	return uri == f.declURI && int(occ.line) == f.declLine && int(occ.character) == f.declCharacter
 }
 
 // qualifiedElsewhere reports whether qualifier::name resolves, and to
@@ -1811,7 +1864,7 @@ func (f *occurrenceFilter) qualifiedElsewhere(qualifier string) bool {
 // closer declaration, lexical or inherited, hides a package or file-scope
 // name. An inherited one (a class member of an unseen base class) is
 // simply not detected, which keeps an extra hit rather than dropping one.
-func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
+func (f *occurrenceFilter) shadowed(uri string, occ occurrence) bool {
 	cands := f.localDecls[uri]
 	if len(cands) == 0 {
 		return false
@@ -1820,7 +1873,7 @@ func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
 	scope := -1
 	for _, i := range cands {
 		p := decls[i].Parent
-		if posWithin(&decls[p], occ.Line, occ.Character) && (scope == -1 || narrower(&decls[p], &decls[scope])) {
+		if posWithin(&decls[p], int(occ.line), int(occ.character)) && (scope == -1 || narrower(&decls[p], &decls[scope])) {
 			scope = p
 		}
 	}
@@ -1921,13 +1974,13 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 		if container, restrict := ix.containerScopeLocked(ref.uri, d); restrict {
 			conn := ix.connectionPositionsLocked(name, ref.uri)
 			for _, occ := range ix.occByName[name][ref.uri] {
-				if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+				if !posWithinBounds(int(occ.line), int(occ.character), container.Line, container.Character, container.EndLine, container.EndCharacter) {
 					continue
 				}
-				if conn[[2]int{occ.Line, occ.Character}] {
+				if conn[[2]int{int(occ.line), int(occ.character)}] {
 					continue
 				}
-				out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character, Kind: d.Kind})
+				out = append(out, Location{URI: ref.uri, Line: int(occ.line), Character: int(occ.character), Kind: d.Kind})
 			}
 		}
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, name, d.Kind)...)

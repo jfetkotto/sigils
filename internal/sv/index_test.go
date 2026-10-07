@@ -2489,7 +2489,51 @@ func TestOccurrenceRecordsUnitQualifier(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module m;\n  $unit::T y;\nendmodule\n")
 	occs := ix.occByName["T"]["file:///a.sv"]
-	if len(occs) != 1 || occs[0].Qualifier != "$unit" {
+	if len(occs) != 1 || occs[0].qualifier() != "$unit" {
 		t.Fatalf("expected one T occurrence qualified by $unit, got %+v", occs)
+	}
+}
+
+// The index stores an occurrence's receiver, qualifier and named-argument
+// flag in one field (see occurrence), which is only lossless while the
+// scanner never sets more than one of them on the same token.
+func TestStoredOccurrenceKeepsReceiverQualifierAndNamedArg(t *testing.T) {
+	src := "module top;\n" +
+		"  assign x = st.field + a . b + pkg::member + $unit::T;\n" +
+		"  leaf u0 (.clk(clk), .rst(r));\n" +
+		"  initial f(.arg(1), .other(2));\n" +
+		"endmodule\n"
+	occs := occurrencesFromSVParseTokens(Lex(src))
+	if len(occs) == 0 {
+		t.Fatal("no occurrences scanned")
+	}
+	var receivers, qualifiers, namedArgs int
+	for _, o := range occs {
+		if o.Receiver != "" {
+			receivers++
+		}
+		if o.Qualifier != "" {
+			qualifiers++
+		}
+		if o.NamedArg {
+			namedArgs++
+		}
+		set := 0
+		for _, b := range []bool{o.Receiver != "", o.Qualifier != "", o.NamedArg} {
+			if b {
+				set++
+			}
+		}
+		if set > 1 {
+			t.Fatalf("%+v sets more than one of Receiver, Qualifier and NamedArg", o)
+		}
+		s := o.stored()
+		if s.receiver() != o.Receiver || s.qualifier() != o.Qualifier || s.namedArg() != o.NamedArg ||
+			int(s.line) != o.Line || int(s.character) != o.Character {
+			t.Fatalf("stored form %+v lost information from %+v", s, o)
+		}
+	}
+	if receivers == 0 || qualifiers == 0 || namedArgs == 0 {
+		t.Fatalf("source doesn't exercise every kind: %d receivers, %d qualifiers, %d named args", receivers, qualifiers, namedArgs)
 	}
 }
