@@ -1,8 +1,7 @@
 package lspserver
 
 import (
-	"fmt"
-	"strings"
+	"slices"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
 
@@ -86,25 +85,22 @@ func diagnosticsToProtocol(diags []sv.Diagnostic) []protocol.Diagnostic {
 //
 // Publishing an empty list for a URI that previously had errors still
 // happens, which is what clears stale squiggles; only a genuine repeat is
-// suppressed.
+// suppressed. A URI with nothing recorded counts as having been published
+// an empty list: the client holds no diagnostics for a URI the server never
+// sent any for, so there is nothing to clear, and a startup pass over a
+// clean workspace sends nothing at all rather than one empty list per file.
+// That also lets an empty list drop its entry, so published only ever holds
+// the URIs currently showing errors.
 func (s *Server) diagnosticsChanged(uri string, diags []sv.Diagnostic) bool {
-	digest := diagnosticsDigest(diags)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if prev, ok := s.published[uri]; ok && prev == digest {
+	if slices.Equal(s.published[uri], diags) { // a missing entry reads as nil, i.e. empty
 		return false
 	}
-	s.published[uri] = digest
-	return true
-}
-
-func diagnosticsDigest(diags []sv.Diagnostic) string {
 	if len(diags) == 0 {
-		return ""
+		delete(s.published, uri)
+	} else {
+		s.published[uri] = diags // Index.Diagnostics hands back a fresh copy, so keeping it is safe
 	}
-	var b strings.Builder
-	for _, d := range diags {
-		fmt.Fprintf(&b, "%d:%d:%s\x00", d.Line, d.Character, d.Message)
-	}
-	return b.String()
+	return true
 }

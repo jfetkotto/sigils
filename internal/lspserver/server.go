@@ -45,10 +45,9 @@ type Server struct {
 	// returns. nil until Initialize runs.
 	notify glsp.NotifyFunc
 
-	// published records, per URI, a digest of the diagnostics last sent to
-	// the client, so an unchanged list isn't sent again. See
-	// publishDiagnostics.
-	published map[string]string
+	// published records, per URI, the diagnostics last sent to the client,
+	// so an unchanged list isn't sent again. See diagnosticsChanged.
+	published map[string][]sv.Diagnostic
 
 	// tokMu guards tokens, the lexed form of each open document -- see
 	// tokensFor.
@@ -64,7 +63,7 @@ func NewServer(log commonlog.Logger) *Server {
 		Log:       log,
 		docs:      document.NewStore(),
 		index:     sv.NewIndex(),
-		published: make(map[string]string),
+		published: make(map[string][]sv.Diagnostic),
 		tokens:    make(map[string]cachedTokens),
 
 		watchDebounce: defaultWatchDebounce,

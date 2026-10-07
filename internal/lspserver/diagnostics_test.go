@@ -31,7 +31,11 @@ func TestPublishDiagnosticsSendsOneNotificationPerURI(t *testing.T) {
 	s.index.SetFile("file:///a.sv", "42;\nmodule top; endmodule\n")
 	s.index.SetFile("file:///b.sv", "module clean; endmodule\n")
 
-	s.publishDiagnostics([]string{"file:///a.sv", "file:///b.sv"})
+	s.index.SetFile("file:///c.sv", "42;\nmodule other; endmodule\n")
+
+	// b.sv is clean and has never been published, so the client has
+	// nothing to clear for it and it gets no notification at all.
+	s.publishDiagnostics([]string{"file:///a.sv", "file:///b.sv", "file:///c.sv"})
 
 	if len(notified) != 2 {
 		t.Fatalf("expected 2 notifications, got %d: %+v", len(notified), notified)
@@ -54,11 +58,47 @@ func TestPublishDiagnosticsSendsOneNotificationPerURI(t *testing.T) {
 	}
 
 	params2, ok := notified[1].params.(protocol.PublishDiagnosticsParams)
-	if !ok || params2.URI != "file:///b.sv" {
+	if !ok || params2.URI != "file:///c.sv" {
 		t.Fatalf("unexpected second notification: %+v", notified[1])
 	}
-	if len(params2.Diagnostics) != 0 {
-		t.Fatalf("expected b.sv (well-formed) to have zero diagnostics, got %+v", params2.Diagnostics)
+}
+
+// A clean file costs no notification until it has errors, gets an empty
+// list once they are fixed (clearing the editor's squiggles), and is then
+// forgotten again.
+func TestPublishDiagnosticsClearsFixedErrorsThenForgetsTheURI(t *testing.T) {
+	var notified []struct {
+		method string
+		params any
+	}
+	s := newTestServer()
+	s.setNotify(capturingNotify(&notified))
+	const uri = "file:///a.sv"
+	publish := func(text string) {
+		s.publishDiagnostics(s.index.SetFile(uri, text))
+	}
+
+	publish("module top; endmodule\n")
+	if len(notified) != 0 {
+		t.Fatalf("a clean, never-published file was sent %+v", notified)
+	}
+
+	publish("42;\nmodule top; endmodule\n")
+	if len(notified) != 1 || len(notified[0].params.(protocol.PublishDiagnosticsParams).Diagnostics) == 0 {
+		t.Fatalf("expected one notification carrying the new error, got %+v", notified)
+	}
+
+	publish("module top; endmodule\n")
+	if len(notified) != 2 || len(notified[1].params.(protocol.PublishDiagnosticsParams).Diagnostics) != 0 {
+		t.Fatalf("expected an empty list clearing the fixed error, got %+v", notified)
+	}
+	if _, ok := s.published[uri]; ok {
+		t.Fatalf("a URI with no diagnostics left is still recorded in published")
+	}
+
+	publish("module top; endmodule\n")
+	if len(notified) != 2 {
+		t.Fatalf("an unchanged clean file was published again: %+v", notified[2:])
 	}
 }
 
@@ -75,7 +115,7 @@ func TestPublishDiagnosticsSkipsNonFilePseudoURI(t *testing.T) {
 	// "<command-line>" (preprocessor.initialMacroFile), not a real
 	// file:// URI -- see SetFile/diagnosticsByFile in internal/sv.
 	s.Index().SetInitialMacros(map[string]string{"FOO": "\"unterminated"})
-	touched := s.index.SetFile("file:///a.sv", "module top; endmodule\n")
+	touched := s.index.SetFile("file:///a.sv", "42;\nmodule top; endmodule\n")
 
 	foundPseudoURI := false
 	for _, uri := range touched {
