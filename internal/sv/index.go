@@ -1,8 +1,8 @@
 package sv
 
 import (
+	"cmp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -305,7 +305,7 @@ func NewIndex() *Index {
 func (ix *Index) Diagnostics(uri string) []Diagnostic {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	return append([]Diagnostic(nil), ix.errByURI[uri]...)
+	return slices.Clone(ix.errByURI[uri])
 }
 
 // SetIncludeResolverFactory configures how SetFile resolves `include
@@ -451,7 +451,7 @@ func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 		delete(ix.dependsOn, uri)
 		return
 	}
-	ix.dependsOn[uri] = append([]string(nil), deps...)
+	ix.dependsOn[uri] = slices.Clone(deps)
 	for _, dep := range deps {
 		backers := ix.dependedOnBy[dep]
 		if backers == nil {
@@ -512,7 +512,7 @@ func (ix *Index) recordContributionsLocked(owner string, produced map[string]boo
 		}
 		backers[owner] = true
 	}
-	sort.Strings(now) // stable storage order; the set semantics don't depend on it
+	slices.Sort(now) // stable storage order; the set semantics don't depend on it
 	ix.contributedTo[owner] = now
 	return dropped
 }
@@ -571,12 +571,10 @@ func (ix *Index) containerStillNamedLocked(uri string, idx int, name string) boo
 func (ix *Index) Dependents(uri string) []string {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	var out []string
-	for w := range ix.dependedOnBy[uri] {
-		out = append(out, w)
+	if len(ix.dependedOnBy[uri]) == 0 {
+		return nil
 	}
-	sort.Strings(out) // map order is nondeterministic; keep results stable
-	return out
+	return sortedKeys(ix.dependedOnBy[uri])
 }
 
 // IncludesOf is Dependents' forward counterpart: the URIs uri's own last
@@ -588,7 +586,7 @@ func (ix *Index) Dependents(uri string) []string {
 func (ix *Index) IncludesOf(uri string) []string {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	return append([]string(nil), ix.dependsOn[uri]...)
+	return slices.Clone(ix.dependsOn[uri])
 }
 
 // AllKnownURIs returns every URI the index currently holds declarations
@@ -1383,11 +1381,7 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 	decl := fields[i]
 
 	bucket := ix.occByName[field]
-	uris := make([]string, 0, len(bucket))
-	for u := range bucket {
-		uris = append(uris, u)
-	}
-	sort.Strings(uris) // map order is nondeterministic; occurrencesLocked sorts for the same reason
+	uris := sortedKeys(bucket)
 
 	// One file accesses the same receiver over and over ("txn.addr" 300
 	// times), and each resolution walks that file's whole declaration
@@ -1567,7 +1561,7 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 		uris = append(uris, uri)
 		total += len(occs)
 	}
-	sort.Strings(uris)
+	slices.Sort(uris)
 
 	out := make([]Location, 0, total)
 	for _, uri := range uris {
@@ -1695,13 +1689,7 @@ func dedupLocations(locs []Location) []Location {
 // onlyURI is non-empty.
 func (ix *Index) namedArgOccurrencesLocked(subURI string, sub *Declaration, name, onlyURI string) []Location {
 	bucket := ix.occByName[name]
-	uris := make([]string, 0, len(bucket))
-	for u := range bucket {
-		if onlyURI == "" || u == onlyURI {
-			uris = append(uris, u)
-		}
-	}
-	sort.Strings(uris)
+	uris := urisIn(bucket, onlyURI)
 
 	var out []Location
 	for _, u := range uris {
@@ -1760,13 +1748,7 @@ func (ix *Index) filteredOccurrencesLocked(name string, refs []declRef, primary 
 	f := ix.newOccurrenceFilterLocked(name, refs, primary, qURI, qLine, qChar)
 
 	bucket := ix.occByName[name]
-	uris := make([]string, 0, len(bucket))
-	for u := range bucket {
-		if onlyURI == "" || u == onlyURI {
-			uris = append(uris, u)
-		}
-	}
-	sort.Strings(uris)
+	uris := urisIn(bucket, onlyURI)
 
 	var out []Location
 	for _, u := range uris {
@@ -1953,11 +1935,14 @@ func (ix *Index) connectionOccurrencesLocked(containerURI string, containerIdx i
 	if len(bucket) == 0 {
 		return nil
 	}
+	// Collected inline rather than through sortedKeys: this runs for every
+	// port and parameter reference query, and the generic helper's map
+	// iteration measured slower here.
 	uris := make([]string, 0, len(bucket))
 	for uri := range bucket {
 		uris = append(uris, uri)
 	}
-	sort.Strings(uris) // map order is nondeterministic; keep results stable
+	slices.Sort(uris) // map order is nondeterministic; keep results stable
 
 	// A file's sites mostly connect one module type after another (every
 	// port of one instantiation, then the next), so the last type's answer
@@ -2513,17 +2498,17 @@ func (ix *Index) WorkspaceSymbols(query string, limit int) (syms []SymbolLocatio
 	defer ix.mu.RUnlock()
 
 	query = strings.ToLower(query)
-	top := newTopK(limit, func(a, b SymbolLocation) bool {
-		switch {
-		case a.Name != b.Name:
-			return a.Name < b.Name
-		case a.URI != b.URI:
-			return a.URI < b.URI
-		case a.Line != b.Line:
-			return a.Line < b.Line
-		default:
-			return a.Character < b.Character
+	top := newTopK(limit, func(a, b SymbolLocation) int {
+		if c := strings.Compare(a.Name, b.Name); c != 0 {
+			return c
 		}
+		if c := strings.Compare(a.URI, b.URI); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Line, b.Line); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Character, b.Character)
 	})
 	for name, refs := range ix.byName {
 		// strings.ToLower returns its input unchanged, without allocating,
@@ -2565,4 +2550,30 @@ func FindOccurrences(text string, name string) []Occurrence {
 		}
 	}
 	return out
+}
+
+// sortedKeys returns m's keys in ascending order: map iteration order is
+// random, and results built from a map have to come out the same on every
+// call. Unlike slices.Sorted(maps.Keys(m)) it sizes the slice once up
+// front, which matters on the per-request paths that call it.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// urisIn is sortedKeys(bucket) restricted to onlyURI when that's
+// non-empty, which document highlight uses to look at one file without
+// iterating every file the name occurs in.
+func urisIn[V any](bucket map[string]V, onlyURI string) []string {
+	if onlyURI == "" {
+		return sortedKeys(bucket)
+	}
+	if _, ok := bucket[onlyURI]; ok {
+		return []string{onlyURI}
+	}
+	return nil
 }

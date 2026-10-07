@@ -2,6 +2,8 @@ package workspace
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"os"
 	"path/filepath"
 )
@@ -26,7 +28,7 @@ type Config struct {
 func LoadConfig(root string) (Config, error) {
 	data, err := os.ReadFile(filepath.Join(root, ConfigFileName))
 	if err != nil {
-		if os.IsNotExist(err) {
+		if errors.Is(err, fs.ErrNotExist) {
 			return Config{}, nil
 		}
 		return Config{}, err

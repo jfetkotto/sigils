@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 
 	"github.com/jfetkotto/sigils/internal/sv"
 )
@@ -36,7 +37,7 @@ func newIncludeResolverFactory(incdirs []string) sv.ResolverFactory {
 	// factory is built (a workspace rebuild replaces the factory itself,
 	// via a fresh call to this function, rather than mutating incdirs in
 	// place).
-	dirs := append([]string(nil), incdirs...)
+	dirs := slices.Clone(incdirs)
 	return func() sv.IncludeResolver {
 		return &includeResolver{incdirs: dirs, seen: make(map[string]bool)}
 	}
@@ -100,5 +101,5 @@ func (r *includeResolver) Resolve(includedPath, fromFile string) (text, resolved
 
 // Resolved implements sv.IncludeResolver.
 func (r *includeResolver) Resolved() []string {
-	return append([]string(nil), r.resolved...)
+	return slices.Clone(r.resolved)
 }

@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -81,7 +83,7 @@ func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile
 func (d *FilelistDiscoverer) IncludeDirs() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return append([]string(nil), d.includeDirs...)
+	return slices.Clone(d.includeDirs)
 }
 
 // Defines returns the +define+ names (and, where given, values) captured
@@ -90,11 +92,7 @@ func (d *FilelistDiscoverer) IncludeDirs() []string {
 func (d *FilelistDiscoverer) Defines() map[string]string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	out := make(map[string]string, len(d.defines))
-	for k, v := range d.defines {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(d.defines)
 }
 
 // discoveryState accumulates everything one Files() call discovers across
@@ -117,7 +115,7 @@ type discoveryState struct {
 func (d *FilelistDiscoverer) VisitedFilelists() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return append([]string(nil), d.visited...)
+	return slices.Clone(d.visited)
 }
 
 func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
@@ -259,7 +257,7 @@ func plusArg(line, flag string) (string, bool) {
 // resolving a relative one against baseDir like every other filelist entry
 // and deduplicating across the whole recursive walk.
 func (d *FilelistDiscoverer) recordIncludeDirs(arg, baseDir string, st *discoveryState) {
-	for _, dir := range strings.Split(arg, "+") {
+	for dir := range strings.SplitSeq(arg, "+") {
 		if dir == "" {
 			continue
 		}
@@ -277,7 +275,7 @@ func (d *FilelistDiscoverer) recordIncludeDirs(arg, baseDir string, st *discover
 // recordDefines adds every '+'-separated NAME or NAME=VALUE in arg (VCS
 // allows "+define+FOO+BAR=1+BAZ" as well as one define per line) to st.
 func recordDefines(arg string, st *discoveryState) {
-	for _, def := range strings.Split(arg, "+") {
+	for def := range strings.SplitSeq(arg, "+") {
 		if def == "" {
 			continue
 		}
