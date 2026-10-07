@@ -2,6 +2,8 @@ package lspserver
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -200,5 +202,95 @@ func BenchmarkDocumentHighlightSignal(b *testing.B) {
 		if _, err := s.TextDocumentDocumentHighlight(nil, params); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// One keystroke in a module whose port names (clk, rst, dataIn, dataOut)
+// are declared by every other module too: the rescan has to retract this
+// file's entries from name buckets that span the whole workspace.
+func BenchmarkDidChange(b *testing.B) {
+	s, probe := benchWorkspace(b)
+	texts := [2]string{benchModule(0), benchModule(0) + "\n"}
+	b.ResetTimer()
+	for i := range b.N {
+		params := &protocol.DidChangeTextDocumentParams{
+			TextDocument: protocol.VersionedTextDocumentIdentifier{
+				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri(probe)},
+				Version:                int32(i + 2),
+			},
+			ContentChanges: []any{protocol.TextDocumentContentChangeEventWhole{Text: texts[i%2]}},
+		}
+		if err := s.TextDocumentDidChange(nil, params); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+// Hover on "st_link.ckSideband": the receiver has to be resolved before
+// the field can be.
+func BenchmarkHoverStructField(b *testing.B) {
+	s, probe := benchWorkspace(b)
+	pos := benchPos(b, benchModule(0), "ckSideband")
+	pos.Character += 2
+	params := &protocol.HoverParams{TextDocumentPositionParams: benchTextDocPos(probe, pos)}
+	b.ResetTimer()
+	for range b.N {
+		if h, err := s.TextDocumentHover(nil, params); err != nil || h == nil {
+			b.Fatalf("hover = %v, %v", h, err)
+		}
+	}
+}
+
+// benchWideModule is one module declaring n signals, ending with a use of
+// the first: resolving it walks a single file's very large declaration
+// bucket rather than many small ones.
+func benchWideModule(n int) string {
+	var b strings.Builder
+	b.WriteString("module wide (\n  input logic clk\n);\n")
+	for i := range n {
+		fmt.Fprintf(&b, "  logic [7:0] sig%d;\n", i)
+	}
+	b.WriteString("  assign sig1 = sig0;\nendmodule\n")
+	return b.String()
+}
+
+func BenchmarkDefinitionWideModule(b *testing.B) {
+	s := newTestServer()
+	const uri = "file:///wide.sv"
+	src := benchWideModule(3000)
+	s.index.SetFile(uri, src)
+	s.docs.Open(document.URI(uri), "systemverilog", 1, src)
+	params := &protocol.DefinitionParams{TextDocumentPositionParams: benchTextDocPos(uri, benchPos(b, src, "= sig0"))}
+	params.Position.Character += 2
+	b.ResetTimer()
+	for range b.N {
+		if locs, err := s.TextDocumentDefinition(nil, params); err != nil || len(locs.([]protocol.Location)) != 1 {
+			b.Fatalf("definition = %v, %v", locs, err)
+		}
+	}
+}
+
+// Saving a header every module includes: each includer is reread from
+// disk and rescanned.
+func BenchmarkCascadeHeaderSave(b *testing.B) {
+	dir := b.TempDir()
+	s := newTestServer()
+	s.index.SetIncludeResolverFactory(newIncludeResolverFactory(nil))
+	hdr := filepath.Join(dir, "hdr.svh")
+	if err := os.WriteFile(hdr, []byte("typedef logic [7:0] byte_t;\n"), 0o644); err != nil {
+		b.Fatal(err)
+	}
+	for i := range benchFiles {
+		path := filepath.Join(dir, fmt.Sprintf("blk%d.sv", i))
+		src := "`include \"hdr.svh\"\n" + benchModule(i)
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			b.Fatal(err)
+		}
+		s.index.SetFile(pathToURI(path), src)
+	}
+	changed := []string{pathToURI(hdr)}
+	b.ResetTimer()
+	for range b.N {
+		s.cascadeReindexDependents(changed)
 	}
 }
