@@ -188,15 +188,15 @@ func hoverText(d sv.Declaration) string {
 	b.WriteString("```systemverilog\n")
 	switch d.Kind {
 	case sv.KindModule, sv.KindInterface, sv.KindProgram:
-		fmt.Fprintf(&b, "%s %s%s", d.Kind, d.Name, portList(d.Ports))
+		fmt.Fprintf(&b, "%s %s%s", d.Kind, d.Name, portList(d.Ports()))
 	case sv.KindFunction, sv.KindTask:
 		if d.Prototype {
 			b.WriteString("extern ")
 		}
-		if d.ReturnType != "" {
-			fmt.Fprintf(&b, "%s %s %s(%s)", d.Kind, d.ReturnType, d.Name, argSummary(d.Args))
+		if d.ReturnType() != "" {
+			fmt.Fprintf(&b, "%s %s %s(%s)", d.Kind, d.ReturnType(), d.Name, argSummary(d.Args()))
 		} else {
-			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args))
+			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args()))
 		}
 	case sv.KindPort, sv.KindVariable, sv.KindArgument:
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
@@ -208,12 +208,12 @@ func hoverText(d sv.Declaration) string {
 		b.WriteString(typedefText(d))
 	case sv.KindEnumMember:
 		switch {
-		case d.Value != "" && d.EnumTypedef != "":
-			fmt.Fprintf(&b, "%s = %s  // %s", d.Name, d.Value, d.EnumTypedef)
-		case d.Value != "":
-			fmt.Fprintf(&b, "%s = %s", d.Name, d.Value)
-		case d.EnumTypedef != "":
-			fmt.Fprintf(&b, "enum member %s  // %s", d.Name, d.EnumTypedef)
+		case d.Value() != "" && d.EnumTypedef() != "":
+			fmt.Fprintf(&b, "%s = %s  // %s", d.Name, d.Value(), d.EnumTypedef())
+		case d.Value() != "":
+			fmt.Fprintf(&b, "%s = %s", d.Name, d.Value())
+		case d.EnumTypedef() != "":
+			fmt.Fprintf(&b, "enum member %s  // %s", d.Name, d.EnumTypedef())
 		default:
 			fmt.Fprintf(&b, "enum member %s", d.Name)
 		}
@@ -245,9 +245,9 @@ func parameterText(d sv.Declaration) string {
 		b.WriteString(" ")
 	}
 	b.WriteString(d.Name)
-	if d.Default != "" {
+	if d.Default() != "" {
 		b.WriteString(" = ")
-		b.WriteString(d.Default)
+		b.WriteString(d.Default())
 	}
 	return b.String()
 }
@@ -326,21 +326,21 @@ func structBody(fields []sv.Port) string {
 // declaration, e.g. "typedef class Foo;") falls back to the bare name,
 // same as any other Kind with nothing further to show.
 func typedefText(d sv.Declaration) string {
-	switch d.TypedefKind {
+	switch d.TypedefKind() {
 	case "alias":
-		return fmt.Sprintf("typedef %s %s", d.AliasType, d.Name)
+		return fmt.Sprintf("typedef %s %s", d.AliasType(), d.Name)
 	case "enum":
 		prefix := "enum"
-		if d.BaseType != "" {
-			prefix += " " + d.BaseType
+		if d.BaseType() != "" {
+			prefix += " " + d.BaseType()
 		}
-		return fmt.Sprintf("typedef %s %s %s", prefix, enumBody(d.EnumMembers), d.Name)
+		return fmt.Sprintf("typedef %s %s %s", prefix, enumBody(d.EnumMembers()), d.Name)
 	case "struct", "union":
-		prefix := d.TypedefKind
-		if d.Packed {
+		prefix := d.TypedefKind()
+		if d.Packed() {
 			prefix += " packed"
 		}
-		return fmt.Sprintf("typedef %s %s %s", prefix, structBody(d.Fields), d.Name)
+		return fmt.Sprintf("typedef %s %s %s", prefix, structBody(d.Fields()), d.Name)
 	default:
 		return fmt.Sprintf("typedef %s", d.Name)
 	}

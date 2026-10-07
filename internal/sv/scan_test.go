@@ -179,7 +179,7 @@ func TestScanDeclarationsTypedefAliasCapturesUnderlyingType(t *testing.T) {
 	src := "typedef logic [7:0] byte_t;\n"
 	decls := ScanDeclarations("test.sv", src)
 	byteT := findDecl(t, decls, "byte_t")
-	if byteT.TypedefKind != "alias" || byteT.AliasType != "logic [7:0]" {
+	if byteT.TypedefKind() != "alias" || byteT.AliasType() != "logic [7:0]" {
 		t.Fatalf("unexpected byte_t: %+v", byteT)
 	}
 }
@@ -204,12 +204,12 @@ func TestScanDeclarationsTypedefStructCapturesFields(t *testing.T) {
 `
 	decls := ScanDeclarations("test.sv", src)
 	pktT := findDecl(t, decls, "pkt_t")
-	if pktT.TypedefKind != "struct" || !pktT.Packed {
+	if pktT.TypedefKind() != "struct" || !pktT.Packed() {
 		t.Fatalf("unexpected pkt_t: %+v", pktT)
 	}
-	if len(pktT.Fields) != 2 || pktT.Fields[0].Name != "data" || pktT.Fields[0].Detail != "logic [7:0]" ||
-		pktT.Fields[1].Name != "valid" || pktT.Fields[1].Detail != "logic" {
-		t.Fatalf("unexpected fields: %+v", pktT.Fields)
+	if len(pktT.Fields()) != 2 || pktT.Fields()[0].Name != "data" || pktT.Fields()[0].Detail != "logic [7:0]" ||
+		pktT.Fields()[1].Name != "valid" || pktT.Fields()[1].Detail != "logic" {
+		t.Fatalf("unexpected fields: %+v", pktT.Fields())
 	}
 }
 
@@ -221,11 +221,11 @@ func TestScanDeclarationsTypedefUnionCapturesFields(t *testing.T) {
 `
 	decls := ScanDeclarations("test.sv", src)
 	rawT := findDecl(t, decls, "raw_t")
-	if rawT.TypedefKind != "union" || !rawT.Packed {
+	if rawT.TypedefKind() != "union" || !rawT.Packed() {
 		t.Fatalf("unexpected raw_t: %+v", rawT)
 	}
-	if len(rawT.Fields) != 2 || rawT.Fields[0].Name != "word" || rawT.Fields[1].Name != "bytes" {
-		t.Fatalf("unexpected fields: %+v", rawT.Fields)
+	if len(rawT.Fields()) != 2 || rawT.Fields()[0].Name != "word" || rawT.Fields()[1].Name != "bytes" {
+		t.Fatalf("unexpected fields: %+v", rawT.Fields())
 	}
 }
 
@@ -241,7 +241,7 @@ func TestScanDeclarationsTypedefForwardDeclarationHasNoTypedefKind(t *testing.T)
 	src := "typedef class my_future_class;\n"
 	decls := ScanDeclarations("test.sv", src)
 	d := findDecl(t, decls, "my_future_class")
-	if d.TypedefKind != "" {
+	if d.TypedefKind() != "" {
 		t.Fatalf("expected no TypedefKind for a forward declaration, got %+v", d)
 	}
 }
@@ -385,7 +385,7 @@ func TestScanDeclarationsExtractsAnsiPortList(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	got := portNames(leaf.Ports)
+	got := portNames(leaf.Ports())
 	want := []string{"clk", "rst_n", "data"}
 	if len(got) != len(want) {
 		t.Fatalf("ports = %v, want %v", got, want)
@@ -395,8 +395,8 @@ func TestScanDeclarationsExtractsAnsiPortList(t *testing.T) {
 			t.Fatalf("ports = %v, want %v", got, want)
 		}
 	}
-	if leaf.Ports[2].Detail != "output logic [7:0]" {
-		t.Fatalf("data port detail = %q, want \"output logic [7:0]\"", leaf.Ports[2].Detail)
+	if leaf.Ports()[2].Detail != "output logic [7:0]" {
+		t.Fatalf("data port detail = %q, want \"output logic [7:0]\"", leaf.Ports()[2].Detail)
 	}
 }
 
@@ -433,11 +433,11 @@ func TestScanDeclarationsContainerParamsExcludesLocalParams(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	if len(leaf.Params) != 1 || leaf.Params[0].Name != "WIDTH" {
-		t.Fatalf("expected only WIDTH in Params (FIXED is a localparam), got %+v", leaf.Params)
+	if len(leaf.Params()) != 1 || leaf.Params()[0].Name != "WIDTH" {
+		t.Fatalf("expected only WIDTH in Params (FIXED is a localparam), got %+v", leaf.Params())
 	}
-	if leaf.Params[0].Detail != "int = 8" {
-		t.Fatalf("WIDTH detail = %q, want \"int = 8\"", leaf.Params[0].Detail)
+	if leaf.Params()[0].Detail != "int = 8" {
+		t.Fatalf("WIDTH detail = %q, want \"int = 8\"", leaf.Params()[0].Detail)
 	}
 }
 
@@ -446,11 +446,11 @@ func TestScanDeclarationsParamPortEntryCreatesIndividualDeclaration(t *testing.T
 	decls := ScanDeclarations("test.sv", src)
 
 	width := findDecl(t, decls, "WIDTH")
-	if width.Kind != KindParameter || width.Detail != "int" || width.Default != "8" {
+	if width.Kind != KindParameter || width.Detail != "int" || width.Default() != "8" {
 		t.Fatalf("unexpected WIDTH: %+v", width)
 	}
 	fixed := findDecl(t, decls, "FIXED")
-	if fixed.Kind != KindParameter || fixed.Detail != "int" || fixed.Default != "1" {
+	if fixed.Kind != KindParameter || fixed.Detail != "int" || fixed.Default() != "1" {
 		t.Fatalf("unexpected FIXED: %+v", fixed)
 	}
 	if fixed.Parent != width.Parent {
@@ -463,7 +463,7 @@ func TestScanDeclarationsBodyLevelParameterHasDetailAndDefault(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 
 	width := findDecl(t, decls, "WIDTH")
-	if width.Kind != KindParameter || width.Detail != "int" || width.Default != "8" {
+	if width.Kind != KindParameter || width.Detail != "int" || width.Default() != "8" {
 		t.Fatalf("unexpected WIDTH: %+v", width)
 	}
 }
@@ -476,7 +476,7 @@ func TestScanDeclarationsPortListWithDefaultValue(t *testing.T) {
 	// The based-literal "1'b0" tokenizes its "b0" as an identifier-looking
 	// run; scanning must stop at "=" so that doesn't get mistaken for the
 	// port name.
-	if got := portNames(leaf.Ports); len(got) != 2 || got[0] != "rst_n" || got[1] != "clk" {
+	if got := portNames(leaf.Ports()); len(got) != 2 || got[0] != "rst_n" || got[1] != "clk" {
 		t.Fatalf("ports = %v, want [rst_n clk]", got)
 	}
 }
@@ -486,7 +486,7 @@ func TestScanDeclarationsPortListSkipsParameterList(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	if got := portNames(leaf.Ports); len(got) != 2 || got[0] != "data" || got[1] != "clk" {
+	if got := portNames(leaf.Ports()); len(got) != 2 || got[0] != "data" || got[1] != "clk" {
 		t.Fatalf("ports = %v, want [data clk] (the #(...) parameter list must not be mistaken for the port list)", got)
 	}
 }
@@ -496,7 +496,7 @@ func TestScanDeclarationsPortListSharedDirection(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	if got := portNames(leaf.Ports); len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+	if got := portNames(leaf.Ports()); len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
 		t.Fatalf("ports = %v, want [a b c]", got)
 	}
 }
@@ -505,8 +505,8 @@ func TestScanDeclarationsNoPortListYieldsNilPorts(t *testing.T) {
 	src := "module leaf;\nendmodule\n"
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
-	if leaf.Ports != nil {
-		t.Fatalf("expected nil ports for a module with no port list, got %+v", leaf.Ports)
+	if leaf.Ports() != nil {
+		t.Fatalf("expected nil ports for a module with no port list, got %+v", leaf.Ports())
 	}
 }
 
@@ -514,8 +514,8 @@ func TestScanDeclarationsClassIsNotGivenPorts(t *testing.T) {
 	src := "class foo;\nendclass\n"
 	decls := ScanDeclarations("test.sv", src)
 	foo := findDecl(t, decls, "foo")
-	if foo.Ports != nil {
-		t.Fatalf("expected class declarations to never get a Ports list, got %+v", foo.Ports)
+	if foo.Ports() != nil {
+		t.Fatalf("expected class declarations to never get a Ports list, got %+v", foo.Ports())
 	}
 }
 
@@ -588,17 +588,17 @@ func TestScanDeclarationsTypedefEnumComputesImplicitValues(t *testing.T) {
 
 	enStates := findDecl(t, decls, "en_States")
 	want := []string{"S_FOO = 0", "S_BAR = 1", "S_BAZ = 2"}
-	if len(enStates.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers, want)
+	if len(enStates.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers(), want)
 	}
 	for i := range want {
-		if enStates.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers, want)
+		if enStates.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers(), want)
 		}
 	}
 
 	sBar := findDecl(t, decls, "S_BAR")
-	if sBar.Value != "1" || sBar.EnumTypedef != "en_States" {
+	if sBar.Value() != "1" || sBar.EnumTypedef() != "en_States" {
 		t.Fatalf("unexpected S_BAR: %+v", sBar)
 	}
 }
@@ -608,12 +608,12 @@ func TestScanDeclarationsTypedefEnumRespectsExplicitValueThenContinuesIncrementi
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
 	want := []string{"A = 0", "B = 5", "C = 6"}
-	if len(tDecl.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+	if len(tDecl.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
 	for i := range want {
-		if tDecl.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+		if tDecl.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 		}
 	}
 }
@@ -623,12 +623,12 @@ func TestScanDeclarationsTypedefEnumHandlesMultipleExplicitValues(t *testing.T) 
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
 	want := []string{"FOO = 0", "BAR = 1", "BAZ = 10", "QUX = 11"}
-	if len(tDecl.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+	if len(tDecl.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
 	for i := range want {
-		if tDecl.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+		if tDecl.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 		}
 	}
 }
@@ -638,16 +638,16 @@ func TestScanDeclarationsTypedefEnumStopsComputingAfterNonLiteralValue(t *testin
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
 	want := []string{"A = WIDTH-1", "B"}
-	if len(tDecl.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+	if len(tDecl.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
 	for i := range want {
-		if tDecl.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+		if tDecl.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 		}
 	}
 	b := findDecl(t, decls, "B")
-	if b.Value != "" {
+	if b.Value() != "" {
 		t.Fatalf("expected B's value to be left uncomputed after a non-literal prior value, got %+v", b)
 	}
 }
@@ -827,11 +827,11 @@ func TestScanDeclarationsFunctionArgs(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 
 	add := findDecl(t, decls, "add")
-	if len(add.Args) != 2 || add.Args[0].Name != "a" || add.Args[1].Name != "b" {
-		t.Fatalf("unexpected add.Args: %+v", add.Args)
+	if len(add.Args()) != 2 || add.Args()[0].Name != "a" || add.Args()[1].Name != "b" {
+		t.Fatalf("unexpected add.Args(): %+v", add.Args())
 	}
-	if add.Args[0].Detail != "int" {
-		t.Fatalf("unexpected arg detail: %q", add.Args[0].Detail)
+	if add.Args()[0].Detail != "int" {
+		t.Fatalf("unexpected arg detail: %q", add.Args()[0].Detail)
 	}
 }
 

@@ -1261,7 +1261,7 @@ func (ix *Index) Ports(name string) ([]Port, bool) {
 	if !ok {
 		return nil, false
 	}
-	return d.Ports, true
+	return d.Ports(), true
 }
 
 // Params returns the overridable ("parameter", not "localparam") entries
@@ -1276,7 +1276,7 @@ func (ix *Index) Params(name string) ([]Port, bool) {
 	if !ok {
 		return nil, false
 	}
-	return d.Params, true
+	return d.Params(), true
 }
 
 // StructFieldLocation returns where field is declared inside the struct or
@@ -1325,12 +1325,12 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 // name-and-detail shape and carries no position).
 func (ix *Index) structTypedefLocked(typeName string) (declRef, []Port, bool) {
 	ref, d, ok := ix.firstDeclLocked(typeName, func(d *Declaration) bool {
-		return d.Kind == KindTypedef && (d.TypedefKind == "struct" || d.TypedefKind == "union")
+		return d.Kind == KindTypedef && (d.TypedefKind() == "struct" || d.TypedefKind() == "union")
 	})
 	if !ok {
 		return declRef{}, nil, false
 	}
-	return ref, d.Fields, true
+	return ref, d.Fields(), true
 }
 
 // ScopedOccurrencesForStructField returns every occurrence of field that is

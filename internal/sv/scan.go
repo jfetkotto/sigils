@@ -94,6 +94,16 @@ var GloballyReferenceableKinds = map[Kind]bool{
 // scope -- including the first declaration on the far side of an
 // `include boundary, whose lexical parent lives in a different file (see
 // declarationsFromAST).
+//
+// Only what most declarations carry is stored inline. Everything specific
+// to one kind (a container's port list, a function's arguments, a
+// typedef's body, an enum member's value, a parameter's default) sits in
+// a separate per-kind struct reached through ext and read through the
+// accessor methods below, which return the zero value for any other kind.
+// The bulk of a real workspace's declarations are ports and variables,
+// which have no such data at all, and every declaration used to carry
+// room for all of it: 352 bytes each, copied in every loop over a file's
+// declarations.
 type Declaration struct {
 	Kind         Kind
 	Name         string
@@ -109,91 +119,19 @@ type Declaration struct {
 	// goto-definition for those; everything else has no such split.
 	Prototype bool
 
-	// Ports holds the ANSI port list for a module/interface/program
-	// declaration (nil for everything else, and for a container with no
-	// port list at all). Used for named-port-connection completion at an
-	// instantiation site. Each port is also separately recorded as its own
-	// KindPort Declaration parented to this one, so referencing a port by
-	// name inside the module body resolves too.
-	Ports []Port
-
-	// Params holds the OVERRIDABLE entries of a module/interface/program's
-	// "#( ... )" parameter port list (nil for everything else) -- used for
-	// parameter-override completion at an instantiation site, the "#(...)"
-	// counterpart to Ports/named-port-connection completion. A "localparam"
-	// entry is deliberately excluded here (per the LRM it can never be
-	// overridden via ".name(value)", so suggesting one would be actively
-	// misleading), even though it -- like every entry -- still gets its
-	// own individual KindParameter Declaration below, parented to this
-	// one, the same way every port does.
-	Params []Port
-
-	// ReturnType holds a function's return type, pre-formatted via
-	// formatType (e.g. "int", "void", "logic [7:0]") -- empty for a
-	// function with an implicit (unspecified) return type, and for every
-	// other Kind, including KindTask (tasks have no return type in SV, so
-	// there's nothing for the *ast.Task case to source this from).
-	ReturnType string
-
-	// Args holds the argument list for a function/task declaration (nil
-	// for everything else). Reuses Port's Name/Detail shape rather than a
-	// near-duplicate type -- a function argument and a port entry have the
-	// identical shape (a name plus a direction/type detail string).
-	Args []Port
-
-	// TypedefKind distinguishes what a KindTypedef declaration's
-	// Underlying actually is, so hover can render each shape correctly.
-	// "" means no recognized underlying type (a forward declaration, e.g.
-	// "typedef class Foo;" or a bare "typedef Foo;").
-	TypedefKind string // "alias" | "enum" | "struct" | "union" | ""
-
-	// AliasType holds the rendered aliased type for a plain alias typedef
-	// ("typedef logic [7:0] byte_t;" -> "logic [7:0]"). Set only when
-	// TypedefKind == "alias".
-	AliasType string
-
-	// BaseType holds an enum typedef's optional base type ("typedef enum
-	// int {...} t;" -> "int"), "" if unwritten. EnumMembers holds each
-	// member rendered as "NAME" or "NAME = value" (the value either as
-	// written, or -- per LRM 6.19 -- computed when none was written and
-	// the auto-increment chain is still known, see enumMemberTexts). Both
-	// set only when TypedefKind == "enum".
-	BaseType    string
-	EnumMembers []string
-
-	// Packed and Fields describe a struct/union typedef's body. Fields
-	// reuses Port's Name/Detail shape -- a struct/union field and a port
-	// share the identical name+type shape. Set only when TypedefKind ==
-	// "struct" or "union".
-	Packed bool
-	Fields []Port
-
-	// Value holds an enum member's resolved value (Kind == KindEnumMember
-	// only): the literal expression as written, or -- when none was
-	// written and the auto-increment chain since the last known integer
-	// value is still intact -- the computed LRM 6.19 default. "" when it
-	// can't be safely computed (a non-integer-literal explicit value
-	// breaks the chain for subsequent unlabeled members).
-	Value string
-
-	// EnumTypedef holds the enclosing enum typedef's name (Kind ==
-	// KindEnumMember only), for hover context.
-	EnumTypedef string
-
-	// TypeName holds a port's or variable's declared type's bare name
-	// (Kind == KindPort or KindVariable only; "" otherwise) -- e.g.
-	// "logic" for a plain net, or "ty_bundle" for a struct/union typedef
-	// reference. It's what backs struct-member completion after
-	// "receiver.": Index.StructFields looks TypeName up against the
-	// workspace's typedefs, and a name that turns out to be a builtin
-	// keyword (like "logic") or a non-struct/union typedef is expected to
-	// simply fail to match there -- no special-casing of builtins is
-	// needed here, this is populated unconditionally from ast.Type.Name.
-	// KindParameter isn't covered even though a struct-typed parameter is
-	// possible in principle ("parameter my_struct_t P = ...") --
-	// convertParams never fed this, following Detail's own precedent of
-	// treating parameters separately; left as follow-on work if that gap
-	// turns out to matter in practice.
+	// TypeName holds a port's, variable's or argument's declared type's
+	// bare name ("" otherwise) -- e.g. "logic" for a plain net, or
+	// "ty_bundle" for a struct/union typedef reference. It's what backs
+	// struct-member completion after "receiver.": Index.StructFields looks
+	// TypeName up against the workspace's typedefs, and a name that turns
+	// out to be a builtin keyword (like "logic") or a non-struct/union
+	// typedef is expected to simply fail to match there -- no
+	// special-casing of builtins is needed here, this is populated
+	// unconditionally from ast.Type.Name. KindParameter isn't covered even
+	// though a struct-typed parameter is possible in principle ("parameter
+	// my_struct_t P = ...") -- convertParams never fed this, following
+	// Detail's own precedent of treating parameters separately; left as
+	// follow-on work if that gap turns out to matter in practice.
 	TypeName string
 
 	// Detail holds a human-readable rendering of this declaration's type
@@ -203,20 +141,16 @@ type Declaration struct {
 	// the type, e.g. "logic [7:0]" or "pkg_types::bus_t" -- formatType's
 	// rendering of TypeName, since a plain variable has no direction to
 	// prefix; Kind == KindParameter: just the type, e.g. "int", "" if
-	// untyped -- see Default below for the piece portEntry-style
-	// rendering can't fold in) -- attached to the declaration's own
-	// individual entry (not just its container's list) so hovering it,
-	// wherever it's referenced, has something to show.
+	// untyped -- see Default for the piece portEntry-style rendering can't
+	// fold in) -- attached to the declaration's own individual entry (not
+	// just its container's list) so hovering it, wherever it's referenced,
+	// has something to show.
 	Detail string
 
-	// Default holds a parameter's default value as written (Kind ==
-	// KindParameter only), "" if none. Kept separate from Detail (rather
-	// than combined the way Port.Detail/portDetail combines direction and
-	// type) because a parameter's default comes AFTER its name in real SV
-	// declaration order ("parameter int WIDTH = 8"), unlike a port's
-	// direction+type prefix -- see hover's dedicated parameterText,
-	// which is why portEntry can't be reused here.
-	Default string
+	// ext is one of *containerExt, *subprogramExt, *typedefExt,
+	// *enumMemberExt or *parameterExt, or nil when the declaration has no
+	// kind-specific data. See declaration.go.
+	ext any
 }
 
 // Port is one entry from a module/interface/program's ANSI port list, or a
@@ -451,8 +385,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent,
-			Ports:  convertPorts(n.Ports),
-			Params: convertParams(n.Params),
+			ext:    newContainerExt(convertPorts(n.Ports), convertParams(n.Params)),
 		})
 		for _, port := range n.Ports {
 			appendDecl(buckets, uri, Declaration{
@@ -469,9 +402,9 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 				Kind: KindParameter, Name: param.Name,
 				Line: param.Line, Character: param.Character,
 				EndLine: param.Line, EndCharacter: param.Character + UTF16Len(param.Name),
-				Parent:  idx,
-				Detail:  formatType(param.Type),
-				Default: joinTokenText(param.Default),
+				Parent: idx,
+				Detail: formatType(param.Type),
+				ext:    newParameterExt(joinTokenText(param.Default)),
 			})
 		}
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
@@ -500,8 +433,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent, Prototype: n.Prototype,
-			ReturnType: formatType(n.ReturnType),
-			Args:       convertArgs(n.Args),
+			ext: newSubprogramExt(formatType(n.ReturnType), convertArgs(n.Args)),
 		})
 		appendArgDecls(buckets, uri, idx, n.Prototype, n.Args)
 
@@ -511,7 +443,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent, Prototype: n.Prototype,
-			Args: convertArgs(n.Args),
+			ext: newSubprogramExt("", convertArgs(n.Args)),
 		})
 		appendArgDecls(buckets, uri, idx, n.Prototype, n.Args)
 
@@ -536,9 +468,8 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 					Kind: KindEnumMember, Name: m.Name,
 					Line: m.Line, Character: m.Character,
 					EndLine: m.Line, EndCharacter: m.Character + UTF16Len(m.Name),
-					Parent:      parent,
-					Value:       enumValues[i],
-					EnumTypedef: n.Name,
+					Parent: parent,
+					ext:    &enumMemberExt{value: enumValues[i], enumTypedef: n.Name},
 				})
 			}
 		}
@@ -550,13 +481,13 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		}
 		switch u := n.Underlying.(type) {
 		case *ast.TypeAlias:
-			td.TypedefKind, td.AliasType = "alias", formatType(u.Type)
+			td.ext = &typedefExt{kind: "alias", aliasType: formatType(u.Type)}
 		case *ast.Enum:
-			td.TypedefKind, td.BaseType, td.EnumMembers = "enum", formatType(u.BaseType), enumLabels
+			td.ext = &typedefExt{kind: "enum", baseType: formatType(u.BaseType), enumMembers: enumLabels}
 		case *ast.Struct:
-			td.TypedefKind, td.Packed, td.Fields = "struct", u.Packed, structUnionFields(u.Members)
+			td.ext = &typedefExt{kind: "struct", packed: u.Packed, fields: structUnionFields(u.Members)}
 		case *ast.Union:
-			td.TypedefKind, td.Packed, td.Fields = "union", u.Packed, structUnionFields(u.Members)
+			td.ext = &typedefExt{kind: "union", packed: u.Packed, fields: structUnionFields(u.Members)}
 		}
 		appendDecl(buckets, uri, td)
 
@@ -575,9 +506,9 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Kind: KindParameter, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
-			Parent:  parent,
-			Detail:  formatType(n.Type),
-			Default: joinTokenText(n.Default),
+			Parent: parent,
+			Detail: formatType(n.Type),
+			ext:    newParameterExt(joinTokenText(n.Default)),
 		})
 
 	case *ast.Modport:

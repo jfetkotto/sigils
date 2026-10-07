@@ -112,7 +112,7 @@ func TestFindInstantiationPortAlsoResolvesParameterOverrides(t *testing.T) {
 	}
 
 	decl, ok := ix.InstantiationPortInfo("leaf", "WIDTH")
-	if !ok || decl.Kind != KindParameter || decl.Detail != "int" || decl.Default != "8" {
+	if !ok || decl.Kind != KindParameter || decl.Detail != "int" || decl.Default() != "8" {
 		t.Fatalf("InstantiationPortInfo(leaf, WIDTH) = %+v, %v", decl, ok)
 	}
 }
@@ -632,7 +632,7 @@ func TestIndexTypedefReturnsFullDeclaration(t *testing.T) {
 	ix.SetFile("file:///a.sv", "typedef struct packed { logic [7:0] a; } bus_t;\n")
 
 	d, ok := ix.Typedef("bus_t")
-	if !ok || d.Kind != KindTypedef || d.TypedefKind != "struct" || len(d.Fields) != 1 {
+	if !ok || d.Kind != KindTypedef || d.TypedefKind() != "struct" || len(d.Fields()) != 1 {
 		t.Fatalf("Typedef(bus_t) = %+v, %v", d, ok)
 	}
 }
@@ -838,7 +838,7 @@ func TestHoverInfoResolvesScopeChain(t *testing.T) {
 	ix.SetFile("file:///top.sv", "module top;\n  leaf u_leaf();\nendmodule\n")
 
 	d, ok := ix.HoverInfo("file:///top.sv", 1, 3, "leaf", "", false)
-	if !ok || d.Kind != KindModule || len(d.Ports) != 1 || d.Ports[0].Name != "clk" {
+	if !ok || d.Kind != KindModule || len(d.Ports()) != 1 || d.Ports()[0].Name != "clk" {
 		t.Fatalf("HoverInfo(leaf) = %+v, %v", d, ok)
 	}
 }
@@ -1536,8 +1536,8 @@ func TestHoverInfoResolvesQualifiedPackageMemberFromIncludedFile(t *testing.T) {
 	if !ok || d.Kind != KindTypedef || d.Name != "t_header_cfg" {
 		t.Fatalf("HoverInfo(pkg_cfg::t_header_cfg) = %+v, %v", d, ok)
 	}
-	if d.TypedefKind != "struct" {
-		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind)
+	if d.TypedefKind() != "struct" {
+		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind())
 	}
 
 	// The inline sibling, which never lost its Parent link, must still
@@ -2160,7 +2160,7 @@ func TestHoverInfoPicksTheSameDeclarationRegardlessOfIndexOrder(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatalf("expected cfg_t to resolve in both orders (%v, %v)", ok1, ok2)
 	}
-	if got1.Line != got2.Line || got1.AliasType != got2.AliasType {
+	if got1.Line != got2.Line || got1.AliasType() != got2.AliasType() {
 		t.Fatalf("index order changed the answer: %+v vs %+v", got1, got2)
 	}
 }
