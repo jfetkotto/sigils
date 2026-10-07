@@ -38,6 +38,7 @@ func TestInitializeFindsWorkspaceRootAndConfig(t *testing.T) {
 		},
 	}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	result, err := s.Initialize(nil, params)
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -78,6 +79,7 @@ func TestInitializeToleratesMissingWorkspaceRoot(t *testing.T) {
 		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: "file://" + dir}},
 	}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, params); err != nil {
 		t.Fatalf("Initialize should not fail when no workspace root is found: %v", err)
 	}
@@ -444,6 +446,7 @@ func TestInitializeWithFilelistConfigIndexesWorkspaceInBackground(t *testing.T) 
 	}
 
 	s := newTestServer()
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, &protocol.InitializeParams{
 		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: "file://" + root}},
 	}); err != nil {
@@ -681,6 +684,7 @@ func TestTextDocumentCompletionInsertTextFormat(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &params); err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 		if _, err := s.Initialize(nil, &params); err != nil {
 			t.Fatalf("Initialize: %v", err)
 		}
@@ -1117,6 +1121,7 @@ func TestTextDocumentCompletionStructMemberNoCallSnippetEvenWithSnippetSupport(t
 	if err := json.Unmarshal([]byte(raw), &params); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, &params); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -1447,6 +1452,7 @@ func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
 		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: protocol.DocumentUri("file://" + root), Name: "root"}},
 	}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, params); err != nil {
 		t.Fatal(err)
 	}
@@ -1461,6 +1467,7 @@ func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
 	s.mu.Unlock()
 	defer realFirst()
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, params); err != nil {
 		t.Fatal(err)
 	}

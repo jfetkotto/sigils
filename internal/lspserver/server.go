@@ -7,6 +7,7 @@ package lspserver
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/tliron/commonlog"
 	"github.com/tliron/glsp"
@@ -53,6 +54,9 @@ type Server struct {
 	// tokensFor.
 	tokMu  sync.Mutex
 	tokens map[string]cachedTokens
+
+	// watchDebounce is set once by NewServer -- see defaultWatchDebounce.
+	watchDebounce time.Duration
 }
 
 func NewServer(log commonlog.Logger) *Server {
@@ -62,6 +66,8 @@ func NewServer(log commonlog.Logger) *Server {
 		index:     sv.NewIndex(),
 		published: make(map[string]string),
 		tokens:    make(map[string]cachedTokens),
+
+		watchDebounce: defaultWatchDebounce,
 	}
 }
 

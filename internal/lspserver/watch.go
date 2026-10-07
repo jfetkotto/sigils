@@ -14,13 +14,14 @@ import (
 	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
-// watchDebounce is how long watchFiles waits after the last file event
-// before acting on the accumulated batch. Many tools save via a temp file
-// plus rename (several events per save), and a filelist change triggers a
-// full workspace rebuild -- reacting per event would re-read files and
-// rebuild the workspace several times for one logical change. A var, not
-// a const, so tests can shorten it.
-var watchDebounce = 500 * time.Millisecond
+// defaultWatchDebounce is how long watchFiles waits after the last file
+// event before acting on the accumulated batch. Many tools save via a temp
+// file plus rename (several events per save), and a filelist change
+// triggers a full workspace rebuild -- reacting per event would re-read
+// files and rebuild the workspace several times for one logical change.
+// NewServer copies it into Server.watchDebounce, which a test can shorten
+// on its own instance without touching any other test's server.
+const defaultWatchDebounce = 500 * time.Millisecond
 
 // watchFiles watches the parent directories of every discovered source
 // file and filelist file for on-disk changes, keeping the index fresh for
@@ -35,7 +36,7 @@ var watchDebounce = 500 * time.Millisecond
 // should rebuild the index and call watchFiles again, since the file set
 // a changed filelist names may be different now. It returns false if ctx
 // was cancelled or the watcher couldn't be started at all. Events are
-// debounced (see watchDebounce): a burst of writes coalesces into one
+// debounced (see defaultWatchDebounce): a burst of writes coalesces into one
 // re-read per touched source file, or one rebuild if any filelist was
 // touched.
 //
@@ -73,16 +74,16 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 	}
 
 	// Debounce state: nothing is acted on until the timer has been quiet
-	// for watchDebounce after the last relevant event. timerC stays nil
+	// for s.watchDebounce after the last relevant event. timerC stays nil
 	// (never selectable) until the first event arms the timer.
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	armTimer := func() {
 		if timer == nil {
-			timer = time.NewTimer(watchDebounce)
+			timer = time.NewTimer(s.watchDebounce)
 			timerC = timer.C
 		} else {
-			timer.Reset(watchDebounce)
+			timer.Reset(s.watchDebounce)
 		}
 	}
 	defer func() {

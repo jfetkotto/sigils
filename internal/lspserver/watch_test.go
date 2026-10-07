@@ -128,16 +128,13 @@ func TestWatchFilesSkipsReindexingOpenDocuments(t *testing.T) {
 	// Shorten the debounce so the 300ms settle below reaches past it --
 	// otherwise the assertion would pass trivially without ever exercising
 	// the open-document skip in syncFromDisk.
-	old := watchDebounce
-	watchDebounce = 50 * time.Millisecond
-	t.Cleanup(func() { watchDebounce = old })
-
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "leaf.sv")
 	writeFileT(t, srcPath, "module old_name;\nendmodule\n")
 	resolved := evalSymT(t, srcPath)
 
 	s := newTestServer()
+	s.watchDebounce = 50 * time.Millisecond
 	uri := pathToURI(srcPath)
 	s.docs.Open(document.URI(uri), "systemverilog", 1, "module old_name;\nendmodule\n")
 	s.index.SetFile(uri, "module old_name;\nendmodule\n")

@@ -120,6 +120,7 @@ func TestInitializeCapturesNotifyFromRealContext(t *testing.T) {
 	}
 	glspCtx := &glsp.Context{Notify: capturingNotify(&notified)}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(glspCtx, &protocol.InitializeParams{}); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -198,6 +199,7 @@ func TestInitializeToleratesNilContext(t *testing.T) {
 	// Several existing tests call Initialize(nil, ...) -- must not panic,
 	// and publishDiagnostics afterward must stay a no-op.
 	s := newTestServer()
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, &protocol.InitializeParams{}); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
