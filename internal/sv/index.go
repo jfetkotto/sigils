@@ -355,7 +355,9 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	if factory != nil {
 		resolver = factory()
 	}
-	declsByURI, occs, diagsByURI, importsByURI, connectionsByURI, memberLinks := Scan(uri, text, resolver, macros)
+	res := Scan(uri, text, resolver, macros)
+	declsByURI, occs, diagsByURI := res.Decls, res.Occurrences, res.Diagnostics
+	importsByURI, connectionsByURI, memberLinks := res.imports, res.connections, res.links
 
 	// Group occurrences by name outside the lock; occurrencesFromSVParseTokens
 	// already interned each name to a single string per file.

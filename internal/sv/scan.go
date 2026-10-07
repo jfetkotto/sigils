@@ -206,8 +206,8 @@ type connectionSite struct {
 // Scan returns text's declarations -- bucketed by the file each one
 // actually belongs to, see declarationsFromAST -- every identifier
 // occurrence in it, and every preprocessing/parsing error recorded along
-// the way, also bucketed by file. Index.SetFile uses this to populate all
-// three.
+// the way, also bucketed by file (see ScanResult). Index.SetFile uses this
+// to populate all three.
 //
 // Declarations and occurrences deliberately come from different token
 // streams. Occurrences (references/rename/documentHighlight) come from
@@ -228,16 +228,39 @@ type connectionSite struct {
 // workspace.FilelistDiscoverer.Defines), so a company-wide flag can gate
 // an `ifdef the same way an in-source `define would. Pass nil where none
 // apply.
-func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]string) (decls map[string][]Declaration, occurrences []Occurrence, diags map[string][]Diagnostic, imports map[string][]importDecl, connections map[string][]connectionSite, links []memberLink) {
+func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]string) ScanResult {
 	lexToks, _ := lexer.Lex(text) // lex errors don't block occurrence collection -- best-effort on malformed/mid-edit text
-	occurrences = occurrencesFromSVParseTokens(lexToks)
+	res := ScanResult{Occurrences: occurrencesFromSVParseTokens(lexToks)}
 
 	ppToks, ppErrs := preprocessor.PreprocessWithOptions(uri, text, resolver, preprocessor.Options{InitialMacros: initialMacros})
 	f, parseErrs := parser.Parse(uri, ppToks)
 
-	diags = diagnosticsByFile(uri, ppErrs, parseErrs)
-	decls, imports, connections, links = declarationsFromAST(f)
-	return decls, occurrences, diags, imports, connections, links
+	res.Diagnostics = diagnosticsByFile(uri, ppErrs, parseErrs)
+	res.Decls, res.imports, res.connections, res.links = declarationsFromAST(f)
+	return res
+}
+
+// ScanResult is everything one Scan call produces. Every map is keyed by
+// the URI each entry belongs to, which for anything reached through an
+// `include is the included file rather than the one scanned.
+type ScanResult struct {
+	// Decls holds each file's declarations, with Parent indices scoped to
+	// that file's own slice -- see declarationsFromAST.
+	Decls map[string][]Declaration
+	// Occurrences holds every identifier token in the scanned file itself,
+	// from its raw, unexpanded text.
+	Occurrences []Occurrence
+	// Diagnostics holds each file's preprocessing and parsing errors,
+	// always with an entry (possibly empty) for the scanned file.
+	Diagnostics map[string][]Diagnostic
+
+	// imports, connections and links are the side channels only Index
+	// consumes: import statements (see importDecl), named instantiation
+	// connections (see connectionSite) and cross-`include container
+	// membership (see memberLink).
+	imports     map[string][]importDecl
+	connections map[string][]connectionSite
+	links       []memberLink
 }
 
 // Diagnostic is a single preprocessing or parsing problem svparse
@@ -273,8 +296,7 @@ func diagnosticsByFile(uri string, ppErrs []preprocessor.Error, parseErrs []pars
 // only want one file's own declarations and don't need cross-file include
 // resolution or initial macros -- mainly tests.
 func ScanDeclarations(uri, text string) []Declaration {
-	decls, _, _, _, _, _ := Scan(uri, text, nil, nil)
-	return decls[uri]
+	return Scan(uri, text, nil, nil).Decls[uri]
 }
 
 // declarationsFromAST walks f's declarations and buckets them by the URI
