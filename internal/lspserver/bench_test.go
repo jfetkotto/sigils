@@ -294,3 +294,23 @@ func BenchmarkCascadeHeaderSave(b *testing.B) {
 		s.cascadeReindexDependents(changed)
 	}
 }
+
+// Hover on "bus.req" where bus is an interface-typed port: the receiver
+// isn't a struct, so the struct-field lookup fails before the interface
+// member lookup answers.
+func BenchmarkHoverInterfaceMember(b *testing.B) {
+	s, _ := benchWorkspace(b)
+	s.index.SetFile("file:///bus_if.sv", "interface bus_if;\n  logic req;\n  logic gnt;\n  modport m (output req, input gnt);\nendinterface\n")
+	const uri = "file:///user.sv"
+	src := "module user (\n  bus_if bus\n);\n  logic x;\n  assign x = bus.req;\nendmodule\n"
+	s.index.SetFile(uri, src)
+	s.docs.Open(document.URI(uri), "systemverilog", 1, src)
+	pos := benchPos(b, src, "req;")
+	params := &protocol.HoverParams{TextDocumentPositionParams: benchTextDocPos(uri, pos)}
+	b.ResetTimer()
+	for range b.N {
+		if h, err := s.TextDocumentHover(nil, params); err != nil || h == nil {
+			b.Fatalf("hover = %v, %v", h, err)
+		}
+	}
+}
