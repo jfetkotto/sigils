@@ -1957,14 +1957,26 @@ func (ix *Index) connectionOccurrencesLocked(containerURI string, containerIdx i
 	}
 	sort.Strings(uris) // map order is nondeterministic; keep results stable
 
+	// A file's sites mostly connect one module type after another (every
+	// port of one instantiation, then the next), so the last type's answer
+	// is kept rather than walking its declarations again for each site.
+	var lastType string
+	var lastHit, haveLast bool
+	targets := func(moduleType string) bool {
+		if !haveLast || moduleType != lastType {
+			lastType, haveLast = moduleType, true
+			lastHit = slices.ContainsFunc(ix.byName[moduleType], func(q declRef) bool {
+				return q.uri == containerURI && q.idx == containerIdx
+			})
+		}
+		return lastHit
+	}
+
 	var out []Location
 	for _, uri := range uris {
 		for _, site := range bucket[uri] {
-			for _, qref := range ix.byName[site.ModuleType] {
-				if qref.uri == containerURI && qref.idx == containerIdx {
-					out = append(out, Location{URI: uri, Line: site.Line, Character: site.Character, Kind: kind})
-					break
-				}
+			if targets(site.ModuleType) {
+				out = append(out, Location{URI: uri, Line: site.Line, Character: site.Character, Kind: kind})
 			}
 		}
 	}

@@ -134,6 +134,41 @@ func LineSlice(text string, line, start, end int) string {
 	return string(lineText[rs:re])
 }
 
+// lineStartBlock is how much text lineStart skips at a time while the
+// target line is still further on.
+const lineStartBlock = 4096
+
+// lineStart returns the byte offset where line (zero-based) begins, or
+// ok=false if text has fewer than line+1 lines.
+//
+// Finding it one newline at a time made a cursor near the end of a
+// 5,000-line file cost 5,000 IndexByte calls per lookup, several lookups
+// per request. Whole blocks are skipped with strings.Count instead, which
+// is vectorized, and only the block holding the target line is walked one
+// newline at a time.
+func lineStart(text string, line int) (int, bool) {
+	if line < 0 {
+		return 0, false
+	}
+	start := 0
+	for line > 0 {
+		if end := start + lineStartBlock; end < len(text) {
+			if n := strings.Count(text[start:end], "\n"); n < line {
+				line -= n
+				start = end
+				continue
+			}
+		}
+		nl := strings.IndexByte(text[start:], '\n')
+		if nl < 0 {
+			return 0, false // fewer than line+1 lines
+		}
+		start += nl + 1
+		line--
+	}
+	return start, true
+}
+
 // lineAt returns line's text (zero-based) as runes, with any trailing '\r'
 // stripped, or ok=false if line is out of range.
 //
@@ -145,16 +180,9 @@ func LineSlice(text string, line, start, end int) string {
 // line. Scanning to the line's own bounds and converting only that slice
 // keeps the cost proportional to the line, not the file.
 func lineAt(text string, line int) ([]rune, bool) {
-	if line < 0 {
+	start, ok := lineStart(text, line)
+	if !ok {
 		return nil, false
-	}
-	start := 0
-	for range line {
-		nl := strings.IndexByte(text[start:], '\n')
-		if nl < 0 {
-			return nil, false // fewer than line+1 lines
-		}
-		start += nl + 1
 	}
 	end := len(text)
 	if nl := strings.IndexByte(text[start:], '\n'); nl >= 0 {

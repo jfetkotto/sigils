@@ -221,3 +221,37 @@ func BenchmarkWordAtLateLine(b *testing.B) {
 		WordAt(text, 4999, 17)
 	}
 }
+
+// lineStart skips whole blocks with strings.Count; it must land on the
+// same offset as walking one newline at a time, including when the target
+// line starts exactly at, or just either side of, a block boundary.
+func TestLineStartMatchesANewlineByNewlineWalk(t *testing.T) {
+	walk := func(text string, line int) (int, bool) {
+		start := 0
+		for range line {
+			nl := strings.IndexByte(text[start:], '\n')
+			if nl < 0 {
+				return 0, false
+			}
+			start += nl + 1
+		}
+		return start, true
+	}
+	var texts []string
+	for _, width := range []int{1, 7, lineStartBlock - 1, lineStartBlock, lineStartBlock + 1} {
+		texts = append(texts, strings.Repeat(strings.Repeat("x", width-1)+"\n", 3*lineStartBlock/width+2))
+	}
+	texts = append(texts, strings.Repeat("\n", 3*lineStartBlock), "no newline at all", "")
+	for _, text := range texts {
+		lines := strings.Count(text, "\n")
+		for _, line := range []int{-1, 0, 1, lines / 2, lines - 1, lines, lines + 1, lines + 50} {
+			wantStart, wantOK := walk(text, line)
+			if line < 0 {
+				wantStart, wantOK = 0, false
+			}
+			if gotStart, gotOK := lineStart(text, line); gotStart != wantStart || gotOK != wantOK {
+				t.Fatalf("lineStart(len %d, %d) = (%d, %v), want (%d, %v)", len(text), line, gotStart, gotOK, wantStart, wantOK)
+			}
+		}
+	}
+}

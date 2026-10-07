@@ -1,6 +1,8 @@
 package sv
 
 import (
+	"sort"
+
 	"github.com/jfetkotto/svparse/lexer"
 	svtoken "github.com/jfetkotto/svparse/token"
 )
@@ -86,27 +88,12 @@ func instantiationContextAt(
 	toks Tokens, line, character int,
 	findModule func(prefix []svtoken.Token, openIdx int) (svtoken.Token, bool),
 ) (moduleName string, connected map[string]bool, ok bool) {
-	cutoff := 0
-	for cutoff < len(toks) && before(toks[cutoff].Line, toks[cutoff].Character, line, character) {
-		cutoff++
-	}
-	prefix := toks[:cutoff]
+	prefix := toks[:tokensBefore(toks, line, character)]
 
-	var open []int
-	for i, t := range prefix {
-		switch t.Kind {
-		case svtoken.KindLParen:
-			open = append(open, i)
-		case svtoken.KindRParen:
-			if len(open) > 0 {
-				open = open[:len(open)-1]
-			}
-		}
-	}
-	if len(open) == 0 {
+	openIdx, ok := innermostOpenParen(prefix)
+	if !ok {
 		return "", nil, false
 	}
-	openIdx := open[len(open)-1]
 
 	moduleTok, found := findModule(prefix, openIdx)
 	if !found {
@@ -129,6 +116,40 @@ func instantiationContextAt(
 	}
 
 	return moduleTok.Text, connected, true
+}
+
+// tokensBefore returns how many of toks start strictly before (line,
+// character). The lexer emits tokens in source order, so this is a binary
+// search rather than a walk from the top of the file.
+func tokensBefore(toks Tokens, line, character int) int {
+	return sort.Search(len(toks), func(i int) bool {
+		return !before(toks[i].Line, toks[i].Character, line, character)
+	})
+}
+
+// innermostOpenParen returns the index of the last "(" in prefix that no
+// later ")" closes -- the innermost paren still open at prefix's end.
+//
+// It walks backward from the end, so the cost is the distance to that
+// paren rather than the length of everything before the cursor. The answer
+// matches a forward stack scan that ignores a ")" with nothing open: a "("
+// reached at depth 0 has every ")" after it matched by a "(" after it, so a
+// forward scan would still hold it on top of its stack, and any surplus ")"
+// before it is one the forward scan would have ignored anyway.
+func innermostOpenParen(prefix []svtoken.Token) (int, bool) {
+	depth := 0
+	for i := len(prefix) - 1; i >= 0; i-- {
+		switch prefix[i].Kind {
+		case svtoken.KindRParen:
+			depth++
+		case svtoken.KindLParen:
+			if depth == 0 {
+				return i, true
+			}
+			depth--
+		}
+	}
+	return 0, false
 }
 
 // instantiationModuleTokenBefore walks backward from openIdx (the index
@@ -275,8 +296,9 @@ func InstantiationParamNameIn(toks Tokens, line int, word string, wordStart int)
 // Located by token span, not by line alone, so more than one directive on a
 // line stays correct.
 func IncludePathIn(toks Tokens, line, character int) (path string, inDirective, ok bool) {
-	for i, t := range toks {
-		if t.Kind != svtoken.KindDirective || t.Text != "include" || t.Line != line {
+	for i := tokensBefore(toks, line, 0); i < len(toks) && toks[i].Line == line; i++ {
+		t := toks[i]
+		if t.Kind != svtoken.KindDirective || t.Text != "include" {
 			continue
 		}
 		// The directive token's Character is the '`' column, while its Text
