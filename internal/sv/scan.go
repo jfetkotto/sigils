@@ -889,17 +889,15 @@ func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 	return out
 }
 
-// isIdentStart/isIdentChar defer to svparse/token rather than defining a
-// rule of their own. They used to use unicode.IsLetter/IsDigit, a looser
-// approximation than the ASCII-only production svparse's lexer actually
-// implements (LRM Annex A: [a-zA-Z_][a-zA-Z0-9_$]*), and the two disagreeing
-// is not a cosmetic difference: these predicates decide what word the cursor
-// sits on and, via IsIdentifier, whether a rename target is writable, so
-// accepting a name the lexer will reject means renaming a symbol into text
-// that no longer tokenizes -- the symbol then can't be found again and the
-// file grows a diagnostic where the rename landed.
-func isIdentStart(r rune) bool { return svtoken.IsIdentStart(r) }
-
+// isIdentChar defers to svparse/token rather than defining a rule of its
+// own. It used to use unicode.IsLetter/IsDigit, a looser approximation than
+// the ASCII-only production svparse's lexer actually implements (LRM Annex
+// A: [a-zA-Z_][a-zA-Z0-9_$]*), and the two disagreeing is not a cosmetic
+// difference: it decides what word the cursor sits on, and
+// svtoken.IsIdentifier (see IsIdentifier) whether a rename target is
+// writable, so accepting a name the lexer will reject means renaming a
+// symbol into text that no longer tokenizes -- the symbol then can't be
+// found again and the file grows a diagnostic where the rename landed.
 func isIdentChar(r rune) bool { return svtoken.IsIdentChar(r) }
 
 // IsIdentifier reports whether name is spelled as a valid SV identifier and
