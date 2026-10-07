@@ -50,10 +50,15 @@ func benchModule(i int) string {
 
 func benchWorkspace(tb testing.TB) (*Server, string) {
 	tb.Helper()
+	return benchWorkspaceN(tb, benchFiles)
+}
+
+func benchWorkspaceN(tb testing.TB, files int) (*Server, string) {
+	tb.Helper()
 	s := newTestServer()
 	s.index.SetFile("file:///pa_cfg.sv", benchPkg())
 	s.index.SetFile("file:///leaf.sv", benchLeaf())
-	for i := range benchFiles {
+	for i := range files {
 		s.index.SetFile(fmt.Sprintf("file:///blk%d.sv", i), benchModule(i))
 	}
 	probe := "file:///blk0.sv"
@@ -211,6 +216,17 @@ func BenchmarkDocumentHighlightSignal(b *testing.B) {
 // file's entries from name buckets that span the whole workspace.
 func BenchmarkDidChange(b *testing.B) {
 	s, probe := benchWorkspace(b)
+	benchDidChange(b, s, probe)
+}
+
+// BenchmarkDidChange at ten times the workspace size, so a per-keystroke
+// cost that grows with the workspace shows up as a gap between the two.
+func BenchmarkDidChangeLargeWorkspace(b *testing.B) {
+	s, probe := benchWorkspaceN(b, 10*benchFiles)
+	benchDidChange(b, s, probe)
+}
+
+func benchDidChange(b *testing.B, s *Server, probe string) {
 	texts := [2]string{benchModule(0), benchModule(0) + "\n"}
 	b.ResetTimer()
 	for i := range b.N {
