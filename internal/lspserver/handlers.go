@@ -46,20 +46,20 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 
 	root, err := workspace.FindRoot(initializeSearchStart(params))
 	if err != nil {
-		s.Log.Warningf("could not locate workspace root: %s; continuing without one", err)
+		s.log.Warningf("could not locate workspace root: %s; continuing without one", err)
 		root = ""
 	}
 
 	var cfg workspace.Config
 	if root != "" {
 		if cfg, err = workspace.LoadConfig(root); err != nil {
-			s.Log.Warningf("failed to load %s: %s", workspace.ConfigFileName, err)
+			s.log.Warningf("failed to load %s: %s", workspace.ConfigFileName, err)
 		}
 	}
 
 	var discoverer workspace.Discoverer
 	if root != "" && len(cfg.Filelists) > 0 {
-		discoverer = workspace.NewFilelistDiscoverer(workspace.Root{Path: root}, cfg, func(msg string) { s.Log.Warning(msg) })
+		discoverer = workspace.NewFilelistDiscoverer(workspace.Root{Path: root}, cfg, func(msg string) { s.log.Warning(msg) })
 	} else {
 		discoverer = workspace.NewStaticDiscoverer(workspaceRoots(params))
 	}
@@ -80,7 +80,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 	s.snippetSupport = clientSupportsSnippets(params)
 	s.mu.Unlock()
 	if prevCancel != nil {
-		s.Log.Warning("initialize received again; cancelling the previous indexing pass")
+		s.log.Warning("initialize received again; cancelling the previous indexing pass")
 		prevCancel()
 	}
 
@@ -136,7 +136,7 @@ func clientSupportsSnippets(params *protocol.InitializeParams) bool {
 // Initialized handles the client's initialized notification. There is
 // nothing left to do by then: Initialize already started indexing.
 func (s *Server) Initialized(_ *glsp.Context, params *protocol.InitializedParams) error {
-	s.Log.Info("initialized")
+	s.log.Info("initialized")
 	return nil
 }
 
@@ -150,7 +150,7 @@ func (s *Server) Shutdown(_ *glsp.Context) error {
 	if cancel != nil {
 		cancel()
 	}
-	s.Log.Info("shutdown requested")
+	s.log.Info("shutdown requested")
 	return nil
 }
 
@@ -172,7 +172,7 @@ func (s *Server) TextDocumentDidOpen(_ *glsp.Context, params *protocol.DidOpenTe
 	if isFileURI(doc.URI) {
 		s.publishDiagnostics(s.index.SetFile(doc.URI, doc.Text))
 	}
-	s.Log.Infof("opened %s", doc.URI)
+	s.log.Infof("opened %s", doc.URI)
 	return nil
 }
 
@@ -191,14 +191,14 @@ func (s *Server) TextDocumentDidChange(_ *glsp.Context, params *protocol.DidChan
 	case protocol.TextDocumentContentChangeEventWhole:
 		text = change.Text
 	case protocol.TextDocumentContentChangeEvent:
-		s.Log.Warningf("received an incremental change for %s despite advertising full-document sync; using its text as the full replacement", params.TextDocument.URI)
+		s.log.Warningf("received an incremental change for %s despite advertising full-document sync; using its text as the full replacement", params.TextDocument.URI)
 		text = change.Text
 	default:
 		return fmt.Errorf("unrecognized content change type %T", change)
 	}
 
 	if !s.docs.ApplyFullChange(document.URI(params.TextDocument.URI), params.TextDocument.Version, text) {
-		s.Log.Warningf("didChange for unknown document %s", params.TextDocument.URI)
+		s.log.Warningf("didChange for unknown document %s", params.TextDocument.URI)
 	}
 	if isFileURI(string(params.TextDocument.URI)) {
 		s.publishDiagnostics(s.index.SetFile(string(params.TextDocument.URI), text))
@@ -212,7 +212,7 @@ func (s *Server) TextDocumentDidClose(_ *glsp.Context, params *protocol.DidClose
 	uri := params.TextDocument.URI
 	s.docs.Close(document.URI(uri))
 	s.forgetTokens(uri)
-	s.Log.Infof("closed %s", uri)
+	s.log.Infof("closed %s", uri)
 
 	// Deliberately not removing the file from s.index: it still exists on
 	// disk, and other files' goto-definition results should keep resolving

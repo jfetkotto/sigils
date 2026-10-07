@@ -86,7 +86,7 @@ func TestWatchFilesReindexesChangedSourceFile(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("new_name"); ok {
+		if _, ok := s.index.Lookup("new_name"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -155,10 +155,10 @@ func TestWatchFilesSkipsReindexingOpenDocuments(t *testing.T) {
 	writeFileT(t, srcPath, "module new_name;\nendmodule\n")
 	time.Sleep(300 * time.Millisecond)
 
-	if _, ok := s.Index().Lookup("new_name"); ok {
+	if _, ok := s.index.Lookup("new_name"); ok {
 		t.Fatalf("expected the on-disk change to be ignored while the document is open")
 	}
-	if _, ok := s.Index().Lookup("old_name"); !ok {
+	if _, ok := s.index.Lookup("old_name"); !ok {
 		t.Fatalf("expected old_name to remain indexed (editor buffer stays authoritative)")
 	}
 
@@ -186,7 +186,7 @@ func TestWatchFilesCoalescesRapidWritesToFinalContent(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("name_v3"); ok {
+		if _, ok := s.index.Lookup("name_v3"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -194,7 +194,7 @@ func TestWatchFilesCoalescesRapidWritesToFinalContent(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, ok := s.Index().Lookup("name_v1"); ok {
+	if _, ok := s.index.Lookup("name_v1"); ok {
 		t.Fatalf("expected the original content to have been replaced")
 	}
 
@@ -237,7 +237,7 @@ func TestWatchFilesCascadesToDependentsOfAChangedInclude(t *testing.T) {
 	s.index.SetFile(pathToURI(defsPath), "`define ENABLE_FOO\n")
 	s.index.SetFile(pathToURI(topPath), "`include \"defs.svh\"\n`ifdef ENABLE_FOO\nmodule foo_only; endmodule\n`endif\n")
 
-	if _, ok := s.Index().Lookup("foo_only"); !ok {
+	if _, ok := s.index.Lookup("foo_only"); !ok {
 		t.Fatalf("expected foo_only to be declared with ENABLE_FOO defined")
 	}
 
@@ -257,7 +257,7 @@ func TestWatchFilesCascadesToDependentsOfAChangedInclude(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("foo_only"); !ok {
+		if _, ok := s.index.Lookup("foo_only"); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -287,7 +287,7 @@ func TestWatchFilesCascadePublishesDiagnosticsForDependent(t *testing.T) {
 	s.index.SetFile(pathToURI(defsPath), "`define VALID_MODE\n")
 	s.index.SetFile(pathToURI(topPath), topText)
 
-	if diags := s.Index().Diagnostics(pathToURI(topPath)); len(diags) != 0 {
+	if diags := s.index.Diagnostics(pathToURI(topPath)); len(diags) != 0 {
 		t.Fatalf("expected top.sv to start with no diagnostics, got %+v", diags)
 	}
 
@@ -336,7 +336,7 @@ func TestWatchFilesCascadeReindexesOpenDependent(t *testing.T) {
 	s.index.SetFile(pathToURI(topPath), topText)
 	s.docs.Open(document.URI(pathToURI(topPath)), "systemverilog", 1, topText)
 
-	if _, ok := s.Index().Lookup("foo_only"); !ok {
+	if _, ok := s.index.Lookup("foo_only"); !ok {
 		t.Fatalf("expected foo_only to be declared with ENABLE_FOO defined")
 	}
 
@@ -355,7 +355,7 @@ func TestWatchFilesCascadeReindexesOpenDependent(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("foo_only"); !ok {
+		if _, ok := s.index.Lookup("foo_only"); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -417,7 +417,7 @@ func TestWatchFilesDropsARemovedSourceFile(t *testing.T) {
 
 	s := newTestServer()
 	s.index.SetFile(pathToURI(srcPath), "module doomed;\nendmodule\n")
-	if _, ok := s.Index().Lookup("doomed"); !ok {
+	if _, ok := s.index.Lookup("doomed"); !ok {
 		t.Fatalf("expected doomed to be indexed to begin with")
 	}
 
@@ -431,7 +431,7 @@ func TestWatchFilesDropsARemovedSourceFile(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("doomed"); !ok {
+		if _, ok := s.index.Lookup("doomed"); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -470,7 +470,7 @@ func TestWatchFilesTreatsRenameBasedSaveAsAChangeNotARemoval(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("new_name"); ok {
+		if _, ok := s.index.Lookup("new_name"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -478,7 +478,7 @@ func TestWatchFilesTreatsRenameBasedSaveAsAChangeNotARemoval(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, ok := s.Index().Lookup("old_name"); ok {
+	if _, ok := s.index.Lookup("old_name"); ok {
 		t.Fatalf("old_name should have been replaced, not kept alongside")
 	}
 

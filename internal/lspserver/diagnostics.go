@@ -31,7 +31,7 @@ func (s *Server) publishDiagnostics(uris []string) {
 	for _, uri := range uris {
 		if !isFileURI(uri) {
 			if diags := s.index.Diagnostics(uri); len(diags) > 0 {
-				s.Log.Warningf("diagnostics for non-file %q not published to the client: %+v", uri, diags)
+				s.log.Warningf("diagnostics for non-file %q not published to the client: %+v", uri, diags)
 			}
 			continue
 		}

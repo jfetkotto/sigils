@@ -114,7 +114,7 @@ func TestPublishDiagnosticsSkipsNonFilePseudoURI(t *testing.T) {
 	// a lexer error attributed to svparse's own pseudo-file
 	// "<command-line>" (preprocessor.initialMacroFile), not a real
 	// file:// URI -- see SetFile/diagnosticsByFile in internal/sv.
-	s.Index().SetInitialMacros(map[string]string{"FOO": "\"unterminated"})
+	s.index.SetInitialMacros(map[string]string{"FOO": "\"unterminated"})
 	touched := s.index.SetFile("file:///a.sv", "42;\nmodule top; endmodule\n")
 
 	foundPseudoURI := false

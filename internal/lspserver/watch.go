@@ -50,7 +50,7 @@ const defaultWatchDebounce = 500 * time.Millisecond
 func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceFile, filelistPaths []string) bool {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		s.Log.Warningf("file watching: could not start: %s", err)
+		s.log.Warningf("file watching: could not start: %s", err)
 		return false
 	}
 	defer watcher.Close()
@@ -69,7 +69,7 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 	}
 	for dir := range dirs {
 		if err := watcher.Add(dir); err != nil {
-			s.Log.Warningf("file watching: could not watch %s: %s", dir, err)
+			s.log.Warningf("file watching: could not watch %s: %s", dir, err)
 		}
 	}
 	if s.watchArmed != nil {
@@ -125,7 +125,7 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 
 			if filelistSet[event.Name] {
 				if !rebuildPending {
-					s.Log.Infof("filelist %s changed on disk; rescanning the workspace shortly", event.Name)
+					s.log.Infof("filelist %s changed on disk; rescanning the workspace shortly", event.Name)
 				}
 				rebuildPending = true
 				armTimer()
@@ -159,7 +159,7 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 			if !ok {
 				return false
 			}
-			s.Log.Warningf("file watching error: %s", err)
+			s.log.Warningf("file watching error: %s", err)
 		}
 	}
 }
@@ -181,12 +181,12 @@ func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		s.publishDiagnostics(s.index.RemoveFile(uri))
-		s.Log.Infof("dropped %s from the index (removed on disk)", logicalPath)
+		s.log.Infof("dropped %s from the index (removed on disk)", logicalPath)
 	case err != nil:
-		s.Log.Warningf("file watching: could not reread %s: %s", eventPath, err)
+		s.log.Warningf("file watching: could not reread %s: %s", eventPath, err)
 	default:
 		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-		s.Log.Infof("reindexed %s after an on-disk change", logicalPath)
+		s.log.Infof("reindexed %s after an on-disk change", logicalPath)
 	}
 }
 
@@ -244,7 +244,7 @@ func (s *Server) cascadeReindexDependents(ctx context.Context, changed []string)
 // A no-op if uri isn't a resolvable file:// URI.
 func (s *Server) reindexURI(uri string) {
 	if s.scanOpenBuffer(uri) {
-		s.Log.Infof("reindexed open buffer %s after a dependency's on-disk change", uri)
+		s.log.Infof("reindexed open buffer %s after a dependency's on-disk change", uri)
 		return
 	}
 	path, err := uriToPath(uri)
@@ -253,9 +253,9 @@ func (s *Server) reindexURI(uri string) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		s.Log.Warningf("file watching: could not reread %s: %s", path, err)
+		s.log.Warningf("file watching: could not reread %s: %s", path, err)
 		return
 	}
 	s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-	s.Log.Infof("reindexed %s after a dependency's on-disk change", path)
+	s.log.Infof("reindexed %s after a dependency's on-disk change", path)
 }

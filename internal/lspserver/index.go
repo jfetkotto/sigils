@@ -28,7 +28,7 @@ import (
 func (s *Server) buildIndex(ctx context.Context, discoverer workspace.Discoverer) []workspace.SourceFile {
 	roots, err := discoverer.Roots(ctx)
 	if err != nil {
-		s.Log.Warningf("indexing: could not list workspace roots: %s", err)
+		s.log.Warningf("indexing: could not list workspace roots: %s", err)
 		return nil
 	}
 
@@ -36,7 +36,7 @@ func (s *Server) buildIndex(ctx context.Context, discoverer workspace.Discoverer
 	for _, root := range roots {
 		files, err := discoverer.Files(ctx, root)
 		if err != nil {
-			s.Log.Warningf("indexing: could not list files under %s: %s", root.Path, err)
+			s.log.Warningf("indexing: could not list files under %s: %s", root.Path, err)
 			continue
 		}
 		all = append(all, files...)
@@ -74,14 +74,14 @@ func (s *Server) buildIndex(ctx context.Context, discoverer workspace.Discoverer
 		}
 		data, err := os.ReadFile(file.ResolvedPath)
 		if err != nil {
-			s.Log.Warningf("indexing: could not read %s: %s", file.ResolvedPath, err)
+			s.log.Warningf("indexing: could not read %s: %s", file.ResolvedPath, err)
 			return
 		}
 		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
 		indexed.Add(1)
 	})
 
-	s.Log.Infof("indexed %d source file(s)", indexed.Load())
+	s.log.Infof("indexed %d source file(s)", indexed.Load())
 	return all
 }
 
@@ -169,11 +169,12 @@ func (s *Server) rebuildIndex(ctx context.Context, discoverer workspace.Discover
 // entries for them so the caller can fold them into the watched file set,
 // and the returned+discovered union into the staleness check, too.
 //
-// Deliberately consults IncludesOf (this pass's fresh data), not
-// AllKnownURIs (which can still hold a stale entry from a file's
-// *previous* scan, before this pass's staleness reconciliation runs) --
-// using the latter would make an include-discovered file "sticky" forever
-// once found once, even after nothing includes it anymore.
+// Deliberately consults IncludesOf (this pass's fresh data), not every URI
+// the index holds declarations for (which can still include a stale entry
+// from a file's *previous* scan, before this pass's staleness
+// reconciliation runs) -- using the latter would make an include-discovered
+// file "sticky" forever once found once, even after nothing includes it
+// anymore.
 func (s *Server) scanIncludeDiscoveredFiles(ctx context.Context, discovered []workspace.SourceFile) []workspace.SourceFile {
 	known := make(map[string]bool, len(discovered))
 	for _, f := range discovered {
@@ -214,7 +215,7 @@ func (s *Server) scanIncludeDiscoveredFiles(ctx context.Context, discovered []wo
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			s.Log.Warningf("indexing: could not read %s (discovered via `include): %s", path, err)
+			s.log.Warningf("indexing: could not read %s (discovered via `include): %s", path, err)
 			return
 		}
 		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
@@ -272,6 +273,6 @@ func (s *Server) removeStaleFiles(prev, current map[string]bool) {
 			continue
 		}
 		s.publishDiagnostics(s.index.RemoveFile(uri))
-		s.Log.Infof("dropped %s from the index (no longer referenced by the workspace)", uri)
+		s.log.Infof("dropped %s from the index (no longer referenced by the workspace)", uri)
 	}
 }

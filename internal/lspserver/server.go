@@ -24,7 +24,7 @@ import (
 // index that backs goto-definition, and the cancel func for the background
 // indexing/file-watching goroutine started at Initialize.
 type Server struct {
-	Log   commonlog.Logger
+	log   commonlog.Logger
 	docs  *document.Store
 	index *sv.Index
 
@@ -65,7 +65,7 @@ type Server struct {
 // is indexed until Initialize runs.
 func NewServer(log commonlog.Logger) *Server {
 	return &Server{
-		Log:       log,
+		log:       log,
 		docs:      document.NewStore(),
 		index:     sv.NewIndex(),
 		published: make(map[string][]sv.Diagnostic),
@@ -73,32 +73,6 @@ func NewServer(log commonlog.Logger) *Server {
 
 		watchDebounce: defaultWatchDebounce,
 	}
-}
-
-func (s *Server) Documents() *document.Store {
-	return s.docs
-}
-
-func (s *Server) Index() *sv.Index {
-	return s.index
-}
-
-func (s *Server) Root() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.root
-}
-
-func (s *Server) Config() workspace.Config {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cfg
-}
-
-func (s *Server) Discoverer() workspace.Discoverer {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.discoverer
 }
 
 // ShutdownReceived reports whether a shutdown request has been handled,

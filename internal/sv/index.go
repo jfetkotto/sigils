@@ -581,28 +581,14 @@ func (ix *Index) Dependents(uri string) []string {
 // IncludesOf is Dependents' forward counterpart: the URIs uri's own last
 // scan resolved an `include to (already the full transitive set -- see
 // dependsOn's doc comment). Used to find files reachable only via
-// `include starting from a freshly-scanned top-level file, without
-// consulting AllKnownURIs, which can still hold a stale entry from a
-// file's *previous* scan until the next rebuild's staleness pass runs.
+// `include starting from a freshly-scanned top-level file, rather than
+// every URI the index holds declarations for, which can still include a
+// stale entry from a file's *previous* scan until the next rebuild's
+// staleness pass runs.
 func (ix *Index) IncludesOf(uri string) []string {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return slices.Clone(ix.dependsOn[uri])
-}
-
-// AllKnownURIs returns every URI the index currently holds declarations
-// for -- including one discovered only via another file's `include (see
-// Scan's file-attribution behavior), not just the workspace's own
-// top-level file list. Used to widen file watching and staleness checks
-// beyond what discovery alone finds.
-func (ix *Index) AllKnownURIs() []string {
-	ix.mu.RLock()
-	defer ix.mu.RUnlock()
-	out := make([]string, 0, len(ix.byURI))
-	for uri := range ix.byURI {
-		out = append(out, uri)
-	}
-	return out
 }
 
 // RemoveFile drops uri's entries entirely, returning every OTHER URI whose
@@ -2450,13 +2436,6 @@ func before(l1, c1, l2, c2 int) bool {
 		return l1 < l2
 	}
 	return c1 < c2
-}
-
-// FileCount reports how many files currently have entries in the index.
-func (ix *Index) FileCount() int {
-	ix.mu.RLock()
-	defer ix.mu.RUnlock()
-	return len(ix.byURI)
 }
 
 // FileDeclarations returns a copy of uri's declarations, in the same order
