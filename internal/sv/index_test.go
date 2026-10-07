@@ -18,8 +18,8 @@ func TestIndexLookup(t *testing.T) {
 	if locs[0].URI != "file:///a.sv" || locs[0].Line != 0 || locs[0].Character != 7 {
 		t.Fatalf("unexpected location: %+v", locs[0])
 	}
-	if len(ix.byURI) != 1 {
-		t.Fatalf("indexed %d files, want 1", len(ix.byURI))
+	if len(ix.files) != 1 {
+		t.Fatalf("indexed %d files, want 1", len(ix.files))
 	}
 }
 
@@ -62,8 +62,8 @@ func TestIndexRemoveFile(t *testing.T) {
 	if _, ok := ix.Lookup("top"); ok {
 		t.Fatalf("expected top to be gone after RemoveFile")
 	}
-	if len(ix.byURI) != 0 {
-		t.Fatalf("indexed %d files, want 0", len(ix.byURI))
+	if len(ix.files) != 0 {
+		t.Fatalf("indexed %d files, want 0", len(ix.files))
 	}
 }
 
@@ -1375,7 +1375,7 @@ func TestIndexHoldsEveryScannedFile(t *testing.T) {
 	ix.SetFile("file:///a.sv", "module a; endmodule")
 	ix.SetFile("file:///b.sv", "module b; endmodule")
 
-	if got, want := sortedKeys(ix.byURI), []string{"file:///a.sv", "file:///b.sv"}; !slices.Equal(got, want) {
+	if got, want := sortedKeys(ix.files), []string{"file:///a.sv", "file:///b.sv"}; !slices.Equal(got, want) {
 		t.Fatalf("indexed %v, want %v", got, want)
 	}
 }
@@ -1385,8 +1385,8 @@ func TestIndexForgetsARemovedFile(t *testing.T) {
 	ix.SetFile("file:///a.sv", "module a; endmodule")
 	ix.RemoveFile("file:///a.sv")
 
-	if len(ix.byURI) != 0 {
-		t.Fatalf("still indexed after RemoveFile: %v", sortedKeys(ix.byURI))
+	if len(ix.files) != 0 {
+		t.Fatalf("still indexed after RemoveFile: %v", sortedKeys(ix.files))
 	}
 }
 
