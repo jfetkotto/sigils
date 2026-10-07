@@ -642,7 +642,7 @@ func completionItemKindFor(kind sv.Kind) protocol.CompletionItemKind {
 		return protocol.CompletionItemKindStruct
 	case sv.KindEnumMember:
 		return protocol.CompletionItemKindEnumMember
-	case sv.KindVariable:
+	case sv.KindVariable, sv.KindArgument:
 		return protocol.CompletionItemKindVariable
 	case sv.KindPort:
 		return protocol.CompletionItemKindProperty

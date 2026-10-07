@@ -2293,3 +2293,69 @@ func TestScopedOccurrencesPackageMemberNestedShadowing(t *testing.T) {
 		t.Fatalf("expected pkg.sv lines 1 and 2 only, got %v", got)
 	}
 }
+
+func TestFunctionArgumentResolvesInsideBody(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module m;\n  logic a;\n  function int f(input int a);\n    return a;\n  endfunction\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///a.sv", 3, 11, "a", "", false)
+	if !ok || len(locs) != 1 || locs[0].Line != 2 {
+		t.Fatalf("expected the argument on line 2, got %+v (ok=%v)", locs, ok)
+	}
+	d, ok := ix.HoverInfo("file:///a.sv", 3, 11, "a", "", false)
+	if !ok || d.Kind != KindArgument {
+		t.Fatalf("expected KindArgument hover, got %+v (ok=%v)", d, ok)
+	}
+}
+
+func TestScopedOccurrencesArgumentRestrictedToSubprogram(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module m;\n  logic a;\n  assign a = 1;\n"+
+		"  function int f(input int a);\n    return a;\n  endfunction\n"+
+		"  task t(input int a);\n    $display(a);\n  endtask\nendmodule\n")
+	ix.SetFile("file:///b.sv", "module n;\n  function int g(int a);\n    return a;\n  endfunction\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///a.sv", 4, 11, "a", "", false))
+	if len(got["file:///b.sv"]) != 0 {
+		t.Errorf("another file's same-named argument must be excluded, got %v", got["file:///b.sv"])
+	}
+	if a := got["file:///a.sv"]; len(a) != 2 || a[0] != 3 || a[1] != 4 {
+		t.Errorf("expected only f's argument and its use (lines 3, 4), got %v", a)
+	}
+}
+
+func TestScopedOccurrencesArgumentKeepsNamedCallSites(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "package p;\n  function int f(int a);\n    return a;\n  endfunction\nendpackage\n")
+	ix.SetFile("file:///b.sv", "module leaf(input logic a);\nendmodule\n"+
+		"module top;\n  logic s;\n  leaf u (.a(s));\n  initial s = p::f(.a(1));\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///a.sv", 2, 11, "a", "", false))
+	// b.sv line 5 is the named call argument; line 4 is a port connection
+	// and line 0 an unrelated port.
+	if b := got["file:///b.sv"]; len(b) != 1 || b[0] != 5 {
+		t.Errorf("expected only the named call site (b.sv line 5), got %v", b)
+	}
+}
+
+func TestScopedOccurrencesPackageMemberDropsArgumentShadow(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///pkg.sv", "package pa;\n  localparam int X = 1;\nendpackage\n")
+	ix.SetFile("file:///m.sv", "module m;\n  import pa::*;\n  localparam int A = X;\n"+
+		"  function int f(int X);\n    return X;\n  endfunction\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))["file:///m.sv"]
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("expected only m.sv line 2 (the argument and its use are dropped), got %v", got)
+	}
+}
+
+func TestPrototypeArgumentsNotIndexed(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "class C;\n  extern function void m(int a);\nendclass\n")
+	for _, d := range ix.FileDeclarations("file:///a.sv") {
+		if d.Kind == KindArgument {
+			t.Fatalf("prototype argument indexed: %+v", d)
+		}
+	}
+}

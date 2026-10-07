@@ -56,6 +56,11 @@ type Occurrence struct {
 	// as Receiver: filtering a workspace-wide candidate list by qualifier
 	// must not mean re-reading every candidate's file.
 	Qualifier string
+	// NamedArg is set when the occurrence is written "(.Name(" or
+	// ", .Name(": the shape of a named port connection or of a named
+	// argument in a function/task call, which the index can't otherwise
+	// tell apart from an ordinary use once the text is gone.
+	NamedArg  bool
 	Line      int
 	Character int
 }
@@ -1387,7 +1392,7 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 		// The declaration's scope is a container in another file, so no
 		// occurrence in this one can be inside it. Connection sites still
 		// can be, though.
-		return ix.connectionOccurrencesInFileLocked(ref.uri, d, word, uri)
+		return append(ix.connectionOccurrencesInFileLocked(ref.uri, d, word, uri), ix.namedArgOccurrencesInFileLocked(ref.uri, d, container, word, uri)...)
 	}
 
 	var out []Location
@@ -1397,7 +1402,15 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 		}
 		out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
 	}
-	return append(out, ix.connectionOccurrencesInFileLocked(ref.uri, d, word, uri)...)
+	out = append(out, ix.connectionOccurrencesInFileLocked(ref.uri, d, word, uri)...)
+	return append(out, ix.namedArgOccurrencesInFileLocked(ref.uri, d, container, word, uri)...)
+}
+
+func (ix *Index) namedArgOccurrencesInFileLocked(subURI string, d, sub Declaration, word, uri string) []Location {
+	if d.Kind != KindArgument {
+		return nil
+	}
+	return ix.namedArgOccurrencesLocked(subURI, sub, word, uri)
 }
 
 func (ix *Index) connectionOccurrencesInFileLocked(containerURI string, d Declaration, word, uri string) []Location {
@@ -1474,6 +1487,10 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 //     connection sites already would. Without this, renaming a port from
 //     its declaration silently leaves every named connection to it (e.g.
 //     ".portName(" at another module's instantiation) stale.
+//   - If it resolves to a function/task argument, the search is
+//     restricted to that subprogram's span, UNION every "(.name(" site
+//     elsewhere that isn't a port connection, since a call may name the
+//     argument (see namedArgOccurrencesLocked).
 //   - If it resolves to a package member, the search stays workspace-wide
 //     but occurrences that provably cannot denote it are dropped (see
 //     packageMemberOccurrencesLocked): a blacklist, so anything ambiguous
@@ -1513,6 +1530,41 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	}
 	if d.Kind == KindPort || d.Kind == KindParameter {
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, word, d.Kind)...)
+	}
+	if d.Kind == KindArgument {
+		out = append(out, ix.namedArgOccurrencesLocked(ref.uri, container, word, "")...)
+	}
+	return out
+}
+
+// namedArgOccurrencesLocked returns every "(.name(" / ", .name(" site
+// outside the subprogram sub (declared in subURI) that isn't a named port
+// connection: any of them may be a named argument in a call to sub. The
+// callee isn't resolved, so this over-approximates on purpose; dropping a
+// real call site would leave rename half done. Only uri is searched when
+// onlyURI is non-empty.
+func (ix *Index) namedArgOccurrencesLocked(subURI string, sub Declaration, name, onlyURI string) []Location {
+	bucket := ix.occByName[name]
+	uris := make([]string, 0, len(bucket))
+	for u := range bucket {
+		if onlyURI == "" || u == onlyURI {
+			uris = append(uris, u)
+		}
+	}
+	sort.Strings(uris)
+
+	var out []Location
+	for _, u := range uris {
+		conn := ix.connectionPositionsLocked(name, u)
+		for _, occ := range bucket[u] {
+			if !occ.NamedArg || conn[[2]int{occ.Line, occ.Character}] {
+				continue
+			}
+			if u == subURI && posWithinBounds(occ.Line, occ.Character, sub.Line, sub.Character, sub.EndLine, sub.EndCharacter) {
+				continue // already in the span result
+			}
+			out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+		}
 	}
 	return out
 }
@@ -1714,6 +1766,9 @@ func (ix *Index) containerScopeLocked(uri string, d Declaration) (Declaration, b
 		return Declaration{}, false
 	}
 	parent := ix.byURI[uri][d.Parent]
+	if d.Kind == KindArgument {
+		return parent, parent.Kind == KindFunction || parent.Kind == KindTask
+	}
 	if parent.Kind != KindModule && parent.Kind != KindInterface && parent.Kind != KindProgram {
 		return Declaration{}, false
 	}

@@ -49,6 +49,11 @@ const (
 	KindVariable  Kind = "variable"
 	KindParameter Kind = "parameter"
 
+	// KindArgument is a function/task's ANSI-style argument, parented to
+	// its subprogram, so it resolves inside the body by the same
+	// scope-chain walk and shadows same-named outer declarations there.
+	KindArgument Kind = "argument"
+
 	// KindModport is a leaf too, but unlike KindPort/KindVariable/
 	// KindParameter it's never resolvable via the ordinary scope-chain
 	// walk at all -- it's only ever reached as a specific interface's own
@@ -490,7 +495,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
 
 	case *ast.Function:
-		appendDecl(buckets, uri, Declaration{
+		idx := appendDecl(buckets, uri, Declaration{
 			Kind: KindFunction, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
@@ -498,15 +503,17 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			ReturnType: formatType(n.ReturnType),
 			Args:       convertArgs(n.Args),
 		})
+		appendArgDecls(buckets, uri, idx, n.Prototype, n.Args)
 
 	case *ast.Task:
-		appendDecl(buckets, uri, Declaration{
+		idx := appendDecl(buckets, uri, Declaration{
 			Kind: KindTask, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent, Prototype: n.Prototype,
 			Args: convertArgs(n.Args),
 		})
+		appendArgDecls(buckets, uri, idx, n.Prototype, n.Args)
 
 	case *ast.Typedef:
 		// Enum members are recorded parented to the typedef's OWN parent,
@@ -647,6 +654,30 @@ func convertPorts(ports []ast.Port) []Port {
 		out[i] = Port{Name: p.Name, Detail: portDetail(p.Direction, p.Type)}
 	}
 	return out
+}
+
+// appendArgDecls records each of a function/task's arguments as its own
+// KindArgument Declaration parented to the subprogram at idx. A
+// prototype's arguments are skipped: its span ends at its name, so they
+// would sit outside their own parent, and nothing in a prototype can
+// refer to them anyway.
+func appendArgDecls(buckets map[string][]Declaration, uri string, idx int, prototype bool, args []ast.Arg) {
+	if prototype {
+		return
+	}
+	for _, a := range args {
+		if a.Name == "" {
+			continue
+		}
+		appendDecl(buckets, uri, Declaration{
+			Kind: KindArgument, Name: a.Name,
+			Line: a.Line, Character: a.Character,
+			EndLine: a.Line, EndCharacter: a.Character + UTF16Len(a.Name),
+			Parent:   idx,
+			Detail:   portDetail(a.Direction, a.Type),
+			TypeName: a.Type.Name,
+		})
+	}
 }
 
 func convertArgs(args []ast.Arg) []Port {
@@ -851,6 +882,12 @@ func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 		// resolve to a struct type later.
 		if i >= 2 && toks[i-1].Kind == svtoken.KindDot && toks[i-2].Kind == svtoken.KindIdent {
 			occ.Receiver = intern(toks[i-2].Text)
+		}
+		// Occurrence.NamedArg: "(.name(" or ", .name(".
+		if i >= 2 && i+1 < len(toks) && toks[i-1].Kind == svtoken.KindDot &&
+			(toks[i-2].Kind == svtoken.KindLParen || toks[i-2].Kind == svtoken.KindComma) &&
+			toks[i+1].Kind == svtoken.KindLParen {
+			occ.NamedArg = true
 		}
 		// Occurrence.Qualifier: "pkg::name" records "pkg" the same way.
 		if i >= 2 && toks[i-1].Kind == svtoken.KindColonColon && toks[i-2].Kind == svtoken.KindIdent {

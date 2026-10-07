@@ -158,7 +158,8 @@ func fieldHoverText(f sv.Port) string {
 }
 
 // hoverContents renders d the same way hoverText always has, then, if d's
-// own declared type (TypeName, Kind == KindPort or KindVariable only)
+// own declared type (TypeName, Kind == KindPort, KindVariable or
+// KindArgument only)
 // itself resolves to a typedef, appends that typedef's own hover
 // rendering as a second fenced block -- e.g. hovering a struct-typed
 // variable shows both "pkg_types::bus_t link" AND the struct's expanded
@@ -192,7 +193,7 @@ func hoverText(d sv.Declaration) string {
 		} else {
 			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args))
 		}
-	case sv.KindPort, sv.KindVariable:
+	case sv.KindPort, sv.KindVariable, sv.KindArgument:
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
 	case sv.KindParameter:
 		fmt.Fprintf(&b, "parameter %s", parameterText(d))
