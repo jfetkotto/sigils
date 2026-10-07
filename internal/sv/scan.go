@@ -26,33 +26,35 @@ import (
 	svtoken "github.com/jfetkotto/svparse/token"
 )
 
-type Kind string
+// Kind is what sort of construct a Declaration is. The zero value is no
+// kind at all; String gives the SystemVerilog-ish name hover text shows.
+type Kind uint8
 
 const (
-	KindModule     Kind = "module"
-	KindInterface  Kind = "interface"
-	KindProgram    Kind = "program"
-	KindClass      Kind = "class"
-	KindPackage    Kind = "package"
-	KindFunction   Kind = "function"
-	KindTask       Kind = "task"
-	KindTypedef    Kind = "typedef"
-	KindEnumMember Kind = "enum_member"
+	KindModule Kind = iota + 1
+	KindInterface
+	KindProgram
+	KindClass
+	KindPackage
+	KindFunction
+	KindTask
+	KindTypedef
+	KindEnumMember
 
 	// KindPort, KindVariable, and KindParameter are leaf declarations --
 	// never containers, never globally referenceable by bare name (see
-	// containerKinds/GloballyReferenceableKinds below). Each is parented to
+	// isContainerKind/IsGloballyReferenceable below). Each is parented to
 	// its enclosing container like any other declaration, which is what
 	// makes it resolvable via the existing scope-chain walk in index.go
 	// with no changes to that resolution logic itself.
-	KindPort      Kind = "port"
-	KindVariable  Kind = "variable"
-	KindParameter Kind = "parameter"
+	KindPort
+	KindVariable
+	KindParameter
 
 	// KindArgument is a function/task's ANSI-style argument, parented to
 	// its subprogram, so it resolves inside the body by the same
 	// scope-chain walk and shadows same-named outer declarations there.
-	KindArgument Kind = "argument"
+	KindArgument
 
 	// KindModport is a leaf too, but unlike KindPort/KindVariable/
 	// KindParameter it's never resolvable via the ordinary scope-chain
@@ -60,33 +62,66 @@ const (
 	// child, via Index.FindModport/ModportInfo (mirroring
 	// FindInstantiationPort's "resolve the container by name, then look
 	// up its child" shape for a named-port connection).
-	KindModport Kind = "modport"
+	KindModport
 )
 
-// ContainerKinds are the declaration kinds that can hold other
-// declarations and so participate in the container stack / scope chain.
-var containerKinds = map[Kind]bool{
-	KindModule:    true,
-	KindInterface: true,
-	KindProgram:   true,
-	KindClass:     true,
-	KindPackage:   true,
-	KindFunction:  true,
-	KindTask:      true,
+var kindNames = [...]string{
+	KindModule:     "module",
+	KindInterface:  "interface",
+	KindProgram:    "program",
+	KindClass:      "class",
+	KindPackage:    "package",
+	KindFunction:   "function",
+	KindTask:       "task",
+	KindTypedef:    "typedef",
+	KindEnumMember: "enum_member",
+	KindPort:       "port",
+	KindVariable:   "variable",
+	KindParameter:  "parameter",
+	KindArgument:   "argument",
+	KindModport:    "modport",
 }
 
-// GloballyReferenceableKinds are kinds realistically referenceable by bare
-// name from anywhere in the workspace without a package/class qualifier.
-// Bare functions/tasks/typedefs need a qualifier or module-local
-// visibility, so they're deliberately excluded from unqualified,
-// out-of-scope global fallback -- see Index.FindDefinition.
-var GloballyReferenceableKinds = map[Kind]bool{
-	KindModule:    true,
-	KindInterface: true,
-	KindProgram:   true,
-	KindClass:     true,
-	KindPackage:   true,
+func (k Kind) String() string {
+	if int(k) < len(kindNames) {
+		return kindNames[k]
+	}
+	return "Kind(" + strconv.Itoa(int(k)) + ")"
 }
+
+// isContainerKind reports whether k can hold other declarations and so
+// participates in the container stack / scope chain.
+func isContainerKind(k Kind) bool {
+	switch k {
+	case KindModule, KindInterface, KindProgram, KindClass, KindPackage, KindFunction, KindTask:
+		return true
+	}
+	return false
+}
+
+// IsGloballyReferenceable reports whether k is realistically referenceable
+// by bare name from anywhere in the workspace without a package/class
+// qualifier. Bare functions/tasks/typedefs need a qualifier or
+// module-local visibility, so they're deliberately excluded from
+// unqualified, out-of-scope global fallback -- see Index.FindDefinition.
+func IsGloballyReferenceable(k Kind) bool {
+	switch k {
+	case KindModule, KindInterface, KindProgram, KindClass, KindPackage:
+		return true
+	}
+	return false
+}
+
+// TypedefKind is what a typedef's underlying type is -- see
+// Declaration.TypedefKind.
+type TypedefKind string
+
+const (
+	TypedefAlias  TypedefKind = "alias"
+	TypedefEnum   TypedefKind = "enum"
+	TypedefStruct TypedefKind = "struct"
+	TypedefUnion  TypedefKind = "union"
+)
 
 // Declaration is a named construct found while scanning a source file.
 // Parent is an index into the same []Declaration slice within the same
@@ -105,19 +140,18 @@ var GloballyReferenceableKinds = map[Kind]bool{
 // room for all of it: 352 bytes each, copied in every loop over a file's
 // declarations.
 type Declaration struct {
-	Kind         Kind
+	Kind Kind
+	// Prototype is true for a function/task declared with no body ("extern
+	// function ...;", "virtual"/"pure virtual function ...;", or a DPI
+	// import). It's what distinguishes goto-declaration from
+	// goto-definition for those; everything else has no such split.
+	Prototype    bool
 	Name         string
 	Line         int // zero-based, matching LSP Position
 	Character    int // zero-based, start of Name
 	EndLine      int
 	EndCharacter int
 	Parent       int
-
-	// Prototype is true for a function/task declared with no body ("extern
-	// function ...;", "virtual"/"pure virtual function ...;", or a DPI
-	// import). It's what distinguishes goto-declaration from
-	// goto-definition for those; everything else has no such split.
-	Prototype bool
 
 	// TypeName holds a port's, variable's or argument's declared type's
 	// bare name ("" otherwise) -- e.g. "logic" for a plain net, or
@@ -503,13 +537,13 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		}
 		switch u := n.Underlying.(type) {
 		case *ast.TypeAlias:
-			td.ext = &typedefExt{kind: "alias", aliasType: formatType(u.Type)}
+			td.ext = &typedefExt{kind: TypedefAlias, aliasType: formatType(u.Type)}
 		case *ast.Enum:
-			td.ext = &typedefExt{kind: "enum", baseType: formatType(u.BaseType), enumMembers: enumLabels}
+			td.ext = &typedefExt{kind: TypedefEnum, baseType: formatType(u.BaseType), enumMembers: enumLabels}
 		case *ast.Struct:
-			td.ext = &typedefExt{kind: "struct", packed: u.Packed, fields: structUnionFields(u.Members)}
+			td.ext = &typedefExt{kind: TypedefStruct, packed: u.Packed, fields: structUnionFields(u.Members)}
 		case *ast.Union:
-			td.ext = &typedefExt{kind: "union", packed: u.Packed, fields: structUnionFields(u.Members)}
+			td.ext = &typedefExt{kind: TypedefUnion, packed: u.Packed, fields: structUnionFields(u.Members)}
 		}
 		appendDecl(buckets, uri, td)
 

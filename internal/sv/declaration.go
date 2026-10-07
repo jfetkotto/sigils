@@ -13,7 +13,7 @@ type subprogramExt struct {
 }
 
 type typedefExt struct {
-	kind        string
+	kind        TypedefKind
 	aliasType   string
 	baseType    string
 	enumMembers []string
@@ -106,11 +106,10 @@ func (d *Declaration) Args() []Port {
 }
 
 // TypedefKind distinguishes what a KindTypedef declaration's underlying
-// type actually is, so hover can render each shape correctly: "alias",
-// "enum", "struct" or "union". "" means no recognized underlying type (a
-// forward declaration, e.g. "typedef class Foo;" or a bare "typedef
-// Foo;"), and for every other Kind.
-func (d *Declaration) TypedefKind() string {
+// type actually is, so hover can render each shape correctly. "" means no
+// recognized underlying type (a forward declaration, e.g. "typedef class
+// Foo;" or a bare "typedef Foo;"), and for every other Kind.
+func (d *Declaration) TypedefKind() TypedefKind {
 	if e, ok := d.ext.(*typedefExt); ok {
 		return e.kind
 	}
@@ -119,7 +118,7 @@ func (d *Declaration) TypedefKind() string {
 
 // AliasType returns the rendered aliased type of a plain alias typedef
 // ("typedef logic [7:0] byte_t;" -> "logic [7:0]"). Set only when
-// TypedefKind is "alias".
+// TypedefKind is TypedefAlias.
 func (d *Declaration) AliasType() string {
 	if e, ok := d.ext.(*typedefExt); ok {
 		return e.aliasType
@@ -129,7 +128,7 @@ func (d *Declaration) AliasType() string {
 
 // BaseType returns an enum typedef's optional base type ("typedef enum int
 // {...} t;" -> "int"), "" if unwritten. Set only when TypedefKind is
-// "enum".
+// TypedefEnum.
 func (d *Declaration) BaseType() string {
 	if e, ok := d.ext.(*typedefExt); ok {
 		return e.baseType
@@ -140,7 +139,7 @@ func (d *Declaration) BaseType() string {
 // EnumMembers returns an enum typedef's members, each rendered as "NAME"
 // or "NAME = value" (the value either as written, or -- per LRM 6.19 --
 // computed when none was written and the auto-increment chain is still
-// known, see enumMemberTexts). Set only when TypedefKind is "enum".
+// known, see enumMemberTexts). Set only when TypedefKind is TypedefEnum.
 func (d *Declaration) EnumMembers() []string {
 	if e, ok := d.ext.(*typedefExt); ok {
 		return e.enumMembers
@@ -149,7 +148,7 @@ func (d *Declaration) EnumMembers() []string {
 }
 
 // Packed reports whether a struct/union typedef is packed. Set only when
-// TypedefKind is "struct" or "union".
+// TypedefKind is TypedefStruct or TypedefUnion.
 func (d *Declaration) Packed() bool {
 	if e, ok := d.ext.(*typedefExt); ok {
 		return e.packed
@@ -159,7 +158,8 @@ func (d *Declaration) Packed() bool {
 
 // Fields returns a struct/union typedef's members, reusing Port's
 // Name/Detail shape -- a struct/union field and a port share the identical
-// name+type shape. Set only when TypedefKind is "struct" or "union".
+// name+type shape. Set only when TypedefKind is TypedefStruct or
+// TypedefUnion.
 func (d *Declaration) Fields() []Port {
 	if e, ok := d.ext.(*typedefExt); ok {
 		return e.fields

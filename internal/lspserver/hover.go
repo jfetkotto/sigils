@@ -327,16 +327,16 @@ func structBody(fields []sv.Port) string {
 // same as any other Kind with nothing further to show.
 func typedefText(d sv.Declaration) string {
 	switch d.TypedefKind() {
-	case "alias":
+	case sv.TypedefAlias:
 		return fmt.Sprintf("typedef %s %s", d.AliasType(), d.Name)
-	case "enum":
+	case sv.TypedefEnum:
 		prefix := "enum"
 		if d.BaseType() != "" {
 			prefix += " " + d.BaseType()
 		}
 		return fmt.Sprintf("typedef %s %s %s", prefix, enumBody(d.EnumMembers()), d.Name)
-	case "struct", "union":
-		prefix := d.TypedefKind()
+	case sv.TypedefStruct, sv.TypedefUnion:
+		prefix := string(d.TypedefKind())
 		if d.Packed() {
 			prefix += " packed"
 		}

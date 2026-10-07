@@ -868,7 +868,7 @@ func TestHoverInfoResolvesFileScopeDeclarationWithNoEnclosingContainer(t *testin
 
 func TestFindDefinitionResolvesTypedefFromIncludedFile(t *testing.T) {
 	// The scope-chain walk is bucket-local and typedef isn't in
-	// GloballyReferenceableKinds, so without the explicit "search this
+	// IsGloballyReferenceable, so without the explicit "search this
 	// file's own `include d files" step, a typedef pulled in via
 	// `include would never resolve from the includer at all -- the
 	// entire point of attributing it to its own file in the first place.

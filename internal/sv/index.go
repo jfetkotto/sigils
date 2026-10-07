@@ -928,9 +928,9 @@ func (ix *Index) containerNameOfLocked(r declRef) string {
 	return ""
 }
 
-// isContainerKind reports whether d is a module/interface/program, the
+// isPortContainer reports whether d is a module/interface/program, the
 // three kinds that carry a port and parameter list.
-func isContainerKind(d *Declaration) bool {
+func isPortContainer(d *Declaration) bool {
 	return d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram
 }
 
@@ -1078,7 +1078,7 @@ func (ix *Index) resolveRefsLocked(uri string, line, character int, word, qualif
 	var out []declRef
 	for _, r := range ix.byName[word] {
 		d := &ix.byURI[r.uri][r.idx]
-		if GloballyReferenceableKinds[d.Kind] {
+		if IsGloballyReferenceable(d.Kind) {
 			out = append(out, r)
 		}
 	}
@@ -1259,7 +1259,7 @@ func (ix *Index) lookupInIncludesRefsLocked(uri, word string) ([]declRef, bool) 
 func (ix *Index) Ports(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
+	_, d, ok := ix.firstDeclLocked(name, isPortContainer)
 	if !ok {
 		return nil, false
 	}
@@ -1274,7 +1274,7 @@ func (ix *Index) Ports(name string) ([]Port, bool) {
 func (ix *Index) Params(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
+	_, d, ok := ix.firstDeclLocked(name, isPortContainer)
 	if !ok {
 		return nil, false
 	}
@@ -1327,7 +1327,7 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 // name-and-detail shape and carries no position).
 func (ix *Index) structTypedefLocked(typeName string) (declRef, []Port, bool) {
 	ref, d, ok := ix.firstDeclLocked(typeName, func(d *Declaration) bool {
-		return d.Kind == KindTypedef && (d.TypedefKind() == "struct" || d.TypedefKind() == "union")
+		return d.Kind == KindTypedef && (d.TypedefKind() == TypedefStruct || d.TypedefKind() == TypedefUnion)
 	})
 	if !ok {
 		return declRef{}, nil, false
@@ -1586,7 +1586,7 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 //   - If word doesn't resolve to a known declaration at all, there's
 //     nothing to restrict by -- return every occurrence of the raw text.
 //   - If it resolves to a module/interface/program/class/package (see
-//     GloballyReferenceableKinds), those are meant to be referenced from
+//     IsGloballyReferenceable), those are meant to be referenced from
 //     anywhere, so the search stays workspace-wide.
 //   - If it resolves to a function/task/typedef/enum member declared
 //     directly inside a module/interface/program, the search is
@@ -1725,7 +1725,7 @@ func (ix *Index) namedArgOccurrencesLocked(subURI string, sub *Declaration, name
 // referenced from any file, so they can't be span-restricted, but both
 // obey the same drop rules.
 func (ix *Index) filtersUnrelatedLocked(ref declRef, d *Declaration) bool {
-	if GloballyReferenceableKinds[d.Kind] {
+	if IsGloballyReferenceable(d.Kind) {
 		return false
 	}
 	return d.Parent == -1 || ix.byURI[ref.uri][d.Parent].Kind == KindPackage
@@ -1834,7 +1834,7 @@ func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary 
 	}
 	for _, r := range ix.byName[name] {
 		decls := ix.byURI[r.uri]
-		if p := decls[r.idx].Parent; p != -1 && containerKinds[decls[p].Kind] {
+		if p := decls[r.idx].Parent; p != -1 && isContainerKind(decls[p].Kind) {
 			f.localDecls[r.uri] = append(f.localDecls[r.uri], r.idx)
 		}
 	}
@@ -1925,7 +1925,7 @@ func (f *occurrenceFilter) shadowed(uri string, occ occurrence) bool {
 // safe to restrict an occurrence search to that container's span -- see
 // ScopedOccurrences for the reasoning.
 func (ix *Index) containerScopeLocked(uri string, d *Declaration) (*Declaration, bool) {
-	if GloballyReferenceableKinds[d.Kind] || d.Parent == -1 {
+	if IsGloballyReferenceable(d.Kind) || d.Parent == -1 {
 		return nil, false
 	}
 	parent := &ix.byURI[uri][d.Parent]
@@ -2217,7 +2217,7 @@ func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, b
 func (ix *Index) lookupInstantiationPortRefsLocked(moduleName, portName string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[moduleName] {
-		if !isContainerKind(&ix.byURI[qref.uri][qref.idx]) {
+		if !isPortContainer(&ix.byURI[qref.uri][qref.idx]) {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, portName)...)
@@ -2488,7 +2488,7 @@ func (ix *Index) FileDeclarations(uri string) []Declaration {
 // IsContainer reports whether kind can hold other declarations, and so
 // participates in the scope chain and gets its own folding range.
 func IsContainer(kind Kind) bool {
-	return containerKinds[kind]
+	return isContainerKind(kind)
 }
 
 // WorkspaceSymbols returns the first limit declarations whose name contains

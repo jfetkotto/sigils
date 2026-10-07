@@ -43,7 +43,7 @@ func (f *fileDecls) build() {
 		f.byName = make([]int, len(f.decls))
 		for i := range f.decls {
 			f.byName[i] = i
-			if containerKinds[f.decls[i].Kind] {
+			if isContainerKind(f.decls[i].Kind) {
 				f.containers = append(f.containers, i)
 			}
 		}
