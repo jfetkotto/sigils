@@ -10,7 +10,7 @@ import (
 // TextDocumentDocumentSymbol builds an outline tree for the file straight
 // from the declaration tree sv.Index already maintains (Parent indices and
 // all), with no extra scanning.
-func (s *Server) TextDocumentDocumentSymbol(context *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
+func (s *Server) TextDocumentDocumentSymbol(_ *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
 	tree := documentSymbolTree(decls, childIndex(decls), -1)
 	if len(tree) == 0 {
@@ -77,7 +77,7 @@ func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []
 // (module/interface/program/class/package/function/task) in the file --
 // their Start/End spans are exactly what sv.Index already tracks to
 // support the scope chain, reused here as-is.
-func (s *Server) TextDocumentFoldingRange(context *glsp.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
+func (s *Server) TextDocumentFoldingRange(_ *glsp.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
 	var ranges []protocol.FoldingRange
 	for i := range decls {
@@ -111,7 +111,7 @@ const maxWorkspaceSymbols = 500
 // workspace/symbol response has no "incomplete" flag to set (it's a bare
 // SymbolInformation array), so narrowing the query is the only way to reach
 // what was cut.
-func (s *Server) WorkspaceSymbol(context *glsp.Context, params *protocol.WorkspaceSymbolParams) ([]protocol.SymbolInformation, error) {
+func (s *Server) WorkspaceSymbol(_ *glsp.Context, params *protocol.WorkspaceSymbolParams) ([]protocol.SymbolInformation, error) {
 	results, _ := s.index.WorkspaceSymbols(params.Query, maxWorkspaceSymbols)
 	out := make([]protocol.SymbolInformation, 0, len(results))
 	for _, r := range results {

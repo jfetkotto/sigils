@@ -23,7 +23,7 @@ import (
 // never find either on its own. A struct/union field access
 // ("receiver.field") is checked next, for the same reason -- see
 // structFieldHover.
-func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
+func (s *Server) TextDocumentHover(_ *glsp.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil
@@ -363,7 +363,7 @@ func argSummary(args []sv.Port) string {
 // then additionally filters to this file, since a highlight is a
 // within-document visual aid even when the symbol itself is referenceable
 // workspace-wide (e.g. a module name).
-func (s *Server) TextDocumentDocumentHighlight(context *glsp.Context, params *protocol.DocumentHighlightParams) ([]protocol.DocumentHighlight, error) {
+func (s *Server) TextDocumentDocumentHighlight(_ *glsp.Context, params *protocol.DocumentHighlightParams) ([]protocol.DocumentHighlight, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil

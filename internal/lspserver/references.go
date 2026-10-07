@@ -16,7 +16,7 @@ import (
 // IncludeDeclaration is false, occurrences that are themselves a
 // declaration site of that name (anywhere within the already-computed
 // result set) are filtered out.
-func (s *Server) TextDocumentReferences(context *glsp.Context, params *protocol.ReferenceParams) ([]protocol.Location, error) {
+func (s *Server) TextDocumentReferences(_ *glsp.Context, params *protocol.ReferenceParams) ([]protocol.Location, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil
@@ -80,7 +80,7 @@ func excludeDeclarationSites(locs []protocol.Location, declLocs []sv.Location, h
 // that word in the whole workspace. A non-keyword word that simply
 // doesn't resolve to any declaration is NOT refused -- lexical,
 // workspace-wide rename of such a name is existing, intentional behavior.
-func (s *Server) TextDocumentRename(context *glsp.Context, params *protocol.RenameParams) (*protocol.WorkspaceEdit, error) {
+func (s *Server) TextDocumentRename(_ *glsp.Context, params *protocol.RenameParams) (*protocol.WorkspaceEdit, error) {
 	if !sv.IsIdentifier(params.NewName) {
 		return nil, fmt.Errorf("%q is not a valid identifier", params.NewName)
 	}

@@ -118,12 +118,12 @@ func clientSupportsSnippets(params *protocol.InitializeParams) bool {
 	return support != nil && *support
 }
 
-func (s *Server) Initialized(context *glsp.Context, params *protocol.InitializedParams) error {
+func (s *Server) Initialized(_ *glsp.Context, params *protocol.InitializedParams) error {
 	s.Log.Info("initialized")
 	return nil
 }
 
-func (s *Server) Shutdown(context *glsp.Context) error {
+func (s *Server) Shutdown(_ *glsp.Context) error {
 	s.mu.Lock()
 	s.shutdownReceived = true
 	cancel := s.watchCancel
@@ -135,12 +135,12 @@ func (s *Server) Shutdown(context *glsp.Context) error {
 	return nil
 }
 
-func (s *Server) SetTrace(context *glsp.Context, params *protocol.SetTraceParams) error {
+func (s *Server) SetTrace(_ *glsp.Context, params *protocol.SetTraceParams) error {
 	protocol.SetTraceValue(params.Value)
 	return nil
 }
 
-func (s *Server) TextDocumentDidOpen(context *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
+func (s *Server) TextDocumentDidOpen(_ *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
 	doc := params.TextDocument
 	s.docs.Open(document.URI(doc.URI), doc.LanguageID, doc.Version, doc.Text)
 	// The document store takes anything the client opens, so hover and
@@ -153,7 +153,7 @@ func (s *Server) TextDocumentDidOpen(context *glsp.Context, params *protocol.Did
 	return nil
 }
 
-func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.DidChangeTextDocumentParams) error {
+func (s *Server) TextDocumentDidChange(_ *glsp.Context, params *protocol.DidChangeTextDocumentParams) error {
 	if len(params.ContentChanges) == 0 {
 		return nil
 	}
@@ -182,7 +182,7 @@ func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.D
 	return nil
 }
 
-func (s *Server) TextDocumentDidClose(context *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
+func (s *Server) TextDocumentDidClose(_ *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
 	uri := params.TextDocument.URI
 	s.docs.Close(document.URI(uri))
 	s.forgetTokens(uri)
@@ -216,7 +216,7 @@ func (s *Server) TextDocumentDidClose(context *glsp.Context, params *protocol.Di
 // resolution, not full LRM-compliant elaboration. It prefers a real body
 // over an extern/pure-virtual/DPI-import prototype when both are known for
 // the same name -- see sv.Index.FindDefinition.
-func (s *Server) TextDocumentDefinition(context *glsp.Context, params *protocol.DefinitionParams) (any, error) {
+func (s *Server) TextDocumentDefinition(_ *glsp.Context, params *protocol.DefinitionParams) (any, error) {
 	return s.resolveWordAt(params.TextDocument.URI, params.Position, s.index.FindDefinition)
 }
 
@@ -226,7 +226,7 @@ func (s *Server) TextDocumentDefinition(context *glsp.Context, params *protocol.
 // For every other SV construct (module, typedef, in-body function/task,
 // ...) there's no meaningful declaration/definition split, so the two
 // handlers return the same thing.
-func (s *Server) TextDocumentDeclaration(context *glsp.Context, params *protocol.DeclarationParams) (any, error) {
+func (s *Server) TextDocumentDeclaration(_ *glsp.Context, params *protocol.DeclarationParams) (any, error) {
 	return s.resolveWordAt(params.TextDocument.URI, params.Position, s.index.FindDeclaration)
 }
 
@@ -456,7 +456,7 @@ const maxSymbolCompletions = 200
 //     empty-prefix request here.
 //
 // No path attempts keyword completion.
-func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.CompletionParams) (any, error) {
+func (s *Server) TextDocumentCompletion(_ *glsp.Context, params *protocol.CompletionParams) (any, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil
