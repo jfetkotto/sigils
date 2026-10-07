@@ -72,6 +72,9 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 			s.Log.Warningf("file watching: could not watch %s: %s", dir, err)
 		}
 	}
+	if s.watchArmed != nil {
+		s.watchArmed()
+	}
 
 	// Debounce state: nothing is acted on until the timer has been quiet
 	// for s.watchDebounce after the last relevant event. timerC stays nil

@@ -56,6 +56,9 @@ type Server struct {
 
 	// watchDebounce is set once by NewServer -- see defaultWatchDebounce.
 	watchDebounce time.Duration
+	// watchArmed, if set, is called each time watchFiles has registered all
+	// of its directories, so a test can wait for that instead of sleeping.
+	watchArmed func()
 }
 
 // NewServer returns a Server with an empty index, logging to log. Nothing

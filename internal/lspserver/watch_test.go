@@ -52,13 +52,20 @@ func (n *threadSafeNotifications) diagnosticsFor(uri string) (protocol.PublishDi
 }
 
 // runWatchFiles starts watchFiles in the background and returns a channel
-// that receives its result once it stops.
+// that receives its result once it stops. It returns only once the watcher
+// has registered every directory, so a write the test makes next is
+// guaranteed to produce an event.
 func runWatchFiles(s *Server, ctx context.Context, sourceFiles []workspace.SourceFile, filelistPaths []string) <-chan bool {
+	armed := make(chan struct{})
+	var once sync.Once
+	s.watchArmed = func() { once.Do(func() { close(armed) }) }
 	done := make(chan bool, 1)
 	go func() { done <- s.watchFiles(ctx, sourceFiles, filelistPaths) }()
-	// Give the watcher a moment to call fsnotify.Add and start selecting
-	// on its Events channel before the test writes to disk.
-	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-armed:
+	case <-time.After(5 * time.Second):
+		panic("watchFiles did not finish registering its directories")
+	}
 	return done
 }
 
