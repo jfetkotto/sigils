@@ -2537,3 +2537,47 @@ func TestStoredOccurrenceKeepsReceiverQualifierAndNamedArg(t *testing.T) {
 		t.Fatalf("source doesn't exercise every kind: %d receivers, %d qualifiers, %d named args", receivers, qualifiers, namedArgs)
 	}
 }
+
+// Rescanning a file drops exactly its own entries from each name's global
+// list, in order, whether they sit at the tail (the file was indexed last)
+// or between other files' entries.
+func TestSetFileReplacesOnlyItsOwnByNameEntries(t *testing.T) {
+	ix := NewIndex()
+	twoX := "module a(input logic x);\n  logic x;\nendmodule\n"
+	oneX := func(m string) string { return "module " + m + ";\n  logic x;\nendmodule\n" }
+	uris := func() []string {
+		locs, _ := ix.Lookup("x")
+		var out []string
+		for _, l := range locs {
+			out = append(out, l.URI)
+		}
+		return out
+	}
+
+	ix.SetFile("file:///a.sv", twoX)
+	ix.SetFile("file:///b.sv", oneX("b"))
+	ix.SetFile("file:///c.sv", oneX("c"))
+	want := []string{"file:///a.sv", "file:///a.sv", "file:///b.sv", "file:///c.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after indexing: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///a.sv", twoX) // entries ahead of other files': filtered
+	want = []string{"file:///b.sv", "file:///c.sv", "file:///a.sv", "file:///a.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after rescanning a.sv: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///a.sv", oneX("a")) // entries at the tail: popped
+	want = []string{"file:///b.sv", "file:///c.sv", "file:///a.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after rescanning a.sv again: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///b.sv", "module b;\nendmodule\n")
+	ix.RemoveFile("file:///c.sv")
+	ix.RemoveFile("file:///a.sv")
+	if got := uris(); got != nil {
+		t.Fatalf("x still declared in %v after every declaration was removed", got)
+	}
+}

@@ -649,27 +649,44 @@ func (ix *Index) clearScanBucketsLocked(uri string) {
 // which has no occurrences or dependency data of its own to touch here.
 func (ix *Index) removeDeclarationsLocked(uri string) {
 	// A file typically declares the same name only once, but prototypes
-	// and their bodies (or plain duplicates) can repeat one -- filter each
-	// name's global ref list once, not once per repeat.
-	seen := make(map[string]bool)
+	// and their bodies (or plain duplicates) can repeat one -- visit each
+	// name's global ref list once, not once per repeat. counts[name] is how
+	// many of that list's entries are uri's: exactly the declarations
+	// SetFile appended for it.
 	decls := ix.byURI[uri]
+	counts := make(map[string]int, len(decls))
 	for i := range decls {
-		name := decls[i].Name
-		if seen[name] {
-			continue
-		}
-		seen[name] = true
+		counts[decls[i].Name]++
+	}
+	for name, own := range counts {
 		refs := ix.byName[name]
-		filtered := refs[:0]
-		for _, r := range refs {
-			if r.uri != uri {
-				filtered = append(filtered, r)
+		// SetFile appends a file's refs at the tail of each name's list, so
+		// when the file being rescanned is also the one indexed last -- the
+		// steady state while typing in one buffer -- all of its refs are
+		// still there and come off in O(own). Names like clk and rst_n are
+		// declared by thousands of modules, so filtering the whole list on
+		// every keystroke cost time proportional to the workspace, under
+		// the write lock. Only when some other file was indexed in between
+		// is the rest of the list filtered, preserving its order either way.
+		n := len(refs)
+		for own > 0 && n > 0 && refs[n-1].uri == uri {
+			n--
+			own--
+		}
+		kept := refs[:n]
+		if own > 0 {
+			kept = refs[:0]
+			for _, r := range refs[:n] {
+				if r.uri != uri {
+					kept = append(kept, r)
+				}
 			}
 		}
-		if len(filtered) == 0 {
+		clear(refs[len(kept):]) // don't keep the dropped URIs alive through the backing array
+		if len(kept) == 0 {
 			delete(ix.byName, name)
 		} else {
-			ix.byName[name] = filtered
+			ix.byName[name] = kept
 		}
 	}
 	delete(ix.byURI, uri)
