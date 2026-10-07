@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jfetkotto/svparse/lexer"
 )
@@ -172,6 +173,11 @@ type Index struct {
 	// (see fileDecls), kept in step with byURI by SetFile and
 	// removeDeclarationsLocked.
 	files map[string]*fileDecls
+	// names is byName's keys in sorted order, or nil until a query needs
+	// it; nameChanges holds the keys one mutation added (+1) or removed
+	// (-1) until syncNamesLocked applies them. See sortedNamesLocked.
+	names       atomic.Pointer[[]string]
+	nameChanges map[string]int
 	// occByName[name][uri] holds every occurrence of name in uri.
 	occByName map[string]map[string][]occurrence
 	// occNamesByURI[uri] lists the distinct identifier names occurring in
@@ -275,6 +281,7 @@ func NewIndex() *Index {
 		byURI:            make(map[string][]Declaration),
 		byName:           make(map[string][]declRef),
 		files:            make(map[string]*fileDecls),
+		nameChanges:      make(map[string]int),
 		occByName:        make(map[string]map[string][]occurrence),
 		occNamesByURI:    make(map[string][]string),
 		dependsOn:        make(map[string][]string),
@@ -368,6 +375,9 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		ix.files[fileURI] = newFileDecls(decls)
 		for i := range decls {
 			d := &decls[i]
+			if _, ok := ix.byName[d.Name]; !ok {
+				ix.noteNameLocked(d.Name, +1)
+			}
 			ix.byName[d.Name] = append(ix.byName[d.Name], declRef{uri: fileURI, idx: i})
 		}
 	}
@@ -418,6 +428,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		deps = resolver.Resolved()
 	}
 	ix.recordDependenciesLocked(uri, deps)
+	ix.syncNamesLocked()
 
 	return touchedURIs
 }
@@ -600,7 +611,9 @@ func (ix *Index) AllKnownURIs() []string {
 func (ix *Index) RemoveFile(uri string) []string {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	return append(ix.removeLocked(uri), uri)
+	cleared := ix.removeLocked(uri)
+	ix.syncNamesLocked()
+	return append(cleared, uri)
 }
 
 // removeLocked drops uri's entries from every part of the index:
@@ -685,6 +698,7 @@ func (ix *Index) removeDeclarationsLocked(uri string) {
 		clear(refs[len(kept):]) // don't keep the dropped URIs alive through the backing array
 		if len(kept) == 0 {
 			delete(ix.byName, name)
+			ix.noteNameLocked(name, -1)
 		} else {
 			ix.byName[name] = kept
 		}
@@ -2017,26 +2031,24 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 //
 // truncated reports that at least one further match existed beyond limit,
 // so the caller can mark its response incomplete. A limit <= 0 means no cap
-// (truncated is then always false). Selecting the limit best rather than
-// sorting everything and slicing keeps a short prefix in a large workspace
-// from allocating the whole symbol table per keystroke -- see topK.
+// (truncated is then always false). The matches are a contiguous run of
+// the sorted name list (see sortedNamesLocked), found by binary search, so
+// a request costs its result size rather than a pass over every name in
+// the workspace -- completion runs on every keystroke.
 func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, truncated bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 
-	top := newTopK(limit, func(a, b Symbol) bool { return a.Name < b.Name })
-	for name, refs := range ix.byName {
-		if prefix != "" && !strings.HasPrefix(name, prefix) {
-			continue
+	names := ix.sortedNamesLocked()
+	i, _ := slices.BinarySearch(names, prefix)
+	for ; i < len(names) && strings.HasPrefix(names[i], prefix); i++ {
+		if limit > 0 && len(syms) == limit {
+			return syms, true
 		}
-		if len(refs) == 0 {
-			continue
-		}
-		ref := ix.primaryRefLocked(refs)
-		d := &ix.byURI[ref.uri][ref.idx]
-		top.push(Symbol{Name: name, Kind: d.Kind})
+		ref := ix.primaryRefLocked(ix.byName[names[i]])
+		syms = append(syms, Symbol{Name: names[i], Kind: ix.byURI[ref.uri][ref.idx].Kind})
 	}
-	return top.sorted()
+	return syms, false
 }
 
 // childRefsLocked returns every declRef that's a direct child of the
