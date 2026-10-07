@@ -1383,8 +1383,8 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 	d := ix.byURI[ref.uri][ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
-		if ix.isPackageMemberLocked(ref, d) {
-			return ix.packageMemberOccurrencesLocked(word, refs, ref, uri, line, character, uri)
+		if ix.filtersUnrelatedLocked(ref, d) {
+			return ix.filteredOccurrencesLocked(word, refs, ref, uri, line, character, uri)
 		}
 		return ix.occurrencesInFileLocked(word, uri)
 	}
@@ -1491,17 +1491,18 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 //     restricted to that subprogram's span, UNION every "(.name(" site
 //     elsewhere that isn't a port connection, since a call may name the
 //     argument (see namedArgOccurrencesLocked).
-//   - If it resolves to a package member, the search stays workspace-wide
-//     but occurrences that provably cannot denote it are dropped (see
-//     packageMemberOccurrencesLocked): a blacklist, so anything ambiguous
+//   - If it resolves to a package member or a file-scope declaration,
+//     the search stays workspace-wide (either can be referenced from
+//     another file, via pkg::name/import or `include/$unit) but
+//     occurrences that provably cannot denote it are dropped (see
+//     filteredOccurrencesLocked): a blacklist, so anything ambiguous
 //     is kept.
-//   - Otherwise (a class member, or a file-scope declaration
-//     with no enclosing container) the search stays workspace-wide,
+//   - Otherwise (a class member) the search stays workspace-wide,
 //     because such a symbol might legitimately be referenced from another
-//     file via a Class::name/pkg::name qualifier, or (for a file-scope
-//     declaration) via `include -- and this lexical index can't tell
-//     those cases apart from "just doesn't happen elsewhere", so it
-//     doesn't risk silently dropping a real reference.
+//     file via a Class::name qualifier, an inherited bare name or a
+//     handle -- and this lexical index can't tell those cases apart from
+//     "just doesn't happen elsewhere", so it doesn't risk silently
+//     dropping a real reference.
 func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualifier string, hasQualifier bool) []Location {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
@@ -1515,8 +1516,8 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	d := ix.byURI[ref.uri][ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
-		if ix.isPackageMemberLocked(ref, d) {
-			return ix.packageMemberOccurrencesLocked(word, refs, ref, uri, line, character, "")
+		if ix.filtersUnrelatedLocked(ref, d) {
+			return ix.filteredOccurrencesLocked(word, refs, ref, uri, line, character, "")
 		}
 		return ix.occurrencesLocked(word)
 	}
@@ -1599,18 +1600,22 @@ func (ix *Index) namedArgOccurrencesLocked(subURI string, sub Declaration, name,
 	return out
 }
 
-// isPackageMemberLocked reports whether d (the declaration ref points at)
-// is a non-container declaration whose parent is a package.
-func (ix *Index) isPackageMemberLocked(ref declRef, d Declaration) bool {
-	if GloballyReferenceableKinds[d.Kind] || d.Parent == -1 {
+// filtersUnrelatedLocked reports whether references to d (the declaration
+// ref points at) go through filteredOccurrencesLocked: a non-container
+// declaration that is a package member or sits at file scope. Both can be
+// referenced from any file, so they can't be span-restricted, but both
+// obey the same drop rules.
+func (ix *Index) filtersUnrelatedLocked(ref declRef, d Declaration) bool {
+	if GloballyReferenceableKinds[d.Kind] {
 		return false
 	}
-	return ix.byURI[ref.uri][d.Parent].Kind == KindPackage
+	return d.Parent == -1 || ix.byURI[ref.uri][d.Parent].Kind == KindPackage
 }
 
-// packageMemberOccurrencesLocked returns the workspace-wide occurrences of
+// filteredOccurrencesLocked returns the workspace-wide occurrences of
 // name minus those the language proves are not references to the package
-// member refs resolved to. Only uri (when onlyURI is non-empty) is
+// member or file-scope declaration refs resolved to (see
+// filtersUnrelatedLocked). Only uri (when onlyURI is non-empty) is
 // searched, for document highlight.
 //
 // It is a blacklist on purpose: this index has no elaborator, so
@@ -1619,17 +1624,21 @@ func (ix *Index) isPackageMemberLocked(ref declRef, d Declaration) bool {
 // An occurrence is dropped only when:
 //
 //  1. it is a named connection site (".name("), which names the
-//     instantiated module's port/parameter, never a package member;
+//     instantiated module's port/parameter, never a package member or
+//     file-scope name;
 //  2. it is a member select ("a.name");
 //  3. it is written "q::name" and q::name resolves, but not to the target
 //     (so q is another package, and any export of the target's package
-//     through q would make q::name resolve to the target and be kept);
+//     through q would make q::name resolve to the target and be kept).
+//     A file-scope declaration in a header `include d into a package body
+//     resolves as that package's member, so "pkg::name" is kept for it;
+//     "$unit::name" resolves to nothing and is kept;
 //  4. it is bare and shadowed by a local declaration (see
-//     pkgMemberFilter.shadowed).
+//     occurrenceFilter.shadowed).
 //
 // The query position and the declaration site are always kept.
-func (ix *Index) packageMemberOccurrencesLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int, onlyURI string) []Location {
-	f := ix.newPkgMemberFilterLocked(name, refs, primary, qURI, qLine, qChar)
+func (ix *Index) filteredOccurrencesLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int, onlyURI string) []Location {
+	f := ix.newOccurrenceFilterLocked(name, refs, primary, qURI, qLine, qChar)
 
 	bucket := ix.occByName[name]
 	uris := make([]string, 0, len(bucket))
@@ -1666,9 +1675,9 @@ func (ix *Index) connectionPositionsLocked(name, uri string) map[[2]int]bool {
 	return out
 }
 
-// pkgMemberFilter holds the per-query state packageMemberOccurrencesLocked
+// occurrenceFilter holds the per-query state filteredOccurrencesLocked
 // applies its drop rules with.
-type pkgMemberFilter struct {
+type occurrenceFilter struct {
 	ix      *Index
 	name    string
 	targets map[declRef]bool
@@ -1686,9 +1695,9 @@ type pkgMemberFilter struct {
 	declCharacter int
 }
 
-func (ix *Index) newPkgMemberFilterLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int) *pkgMemberFilter {
+func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int) *occurrenceFilter {
 	d := ix.byURI[primary.uri][primary.idx]
-	f := &pkgMemberFilter{
+	f := &occurrenceFilter{
 		ix:            ix,
 		name:          name,
 		targets:       make(map[declRef]bool, len(refs)),
@@ -1715,7 +1724,7 @@ func (ix *Index) newPkgMemberFilterLocked(name string, refs []declRef, primary d
 
 // keep applies the drop rules to one occurrence in uri; conn is uri's
 // connectionPositionsLocked.
-func (f *pkgMemberFilter) keep(uri string, occ Occurrence, conn map[[2]int]bool) bool {
+func (f *occurrenceFilter) keep(uri string, occ Occurrence, conn map[[2]int]bool) bool {
 	if f.isAnchor(uri, occ) {
 		return true
 	}
@@ -1733,7 +1742,7 @@ func (f *pkgMemberFilter) keep(uri string, occ Occurrence, conn map[[2]int]bool)
 
 // isAnchor reports whether occ is the query position or the target's own
 // declaration site, which are never dropped.
-func (f *pkgMemberFilter) isAnchor(uri string, occ Occurrence) bool {
+func (f *occurrenceFilter) isAnchor(uri string, occ Occurrence) bool {
 	if uri == f.qURI && occ.Line == f.qLine && f.qChar >= occ.Character && f.qChar <= occ.Character+len(f.name) {
 		return true
 	}
@@ -1742,7 +1751,7 @@ func (f *pkgMemberFilter) isAnchor(uri string, occ Occurrence) bool {
 
 // qualifiedElsewhere reports whether qualifier::name resolves, and to
 // nothing that is a target.
-func (f *pkgMemberFilter) qualifiedElsewhere(qualifier string) bool {
+func (f *occurrenceFilter) qualifiedElsewhere(qualifier string) bool {
 	if v, ok := f.qualMemo[qualifier]; ok {
 		return v
 	}
@@ -1764,7 +1773,12 @@ func (f *pkgMemberFilter) qualifiedElsewhere(qualifier string) bool {
 // rung is deliberately not consulted (localDecls excludes it), since a
 // same-named file-scope declaration in another file may just be an
 // `ifdef variant.
-func (f *pkgMemberFilter) shadowed(uri string, occ Occurrence) bool {
+//
+// A lexical shadow is proof for both target kinds this filter serves: any
+// closer declaration, lexical or inherited, hides a package or file-scope
+// name. An inherited one (a class member of an unseen base class) is
+// simply not detected, which keeps an extra hit rather than dropping one.
+func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
 	cands := f.localDecls[uri]
 	if len(cands) == 0 {
 		return false

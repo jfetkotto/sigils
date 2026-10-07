@@ -890,7 +890,10 @@ func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 			occ.NamedArg = true
 		}
 		// Occurrence.Qualifier: "pkg::name" records "pkg" the same way.
-		if i >= 2 && toks[i-1].Kind == svtoken.KindColonColon && toks[i-2].Kind == svtoken.KindIdent {
+		// "$unit::name" lexes "$unit" as a system identifier and is
+		// recorded too, so it is never mistaken for a bare use.
+		if i >= 2 && toks[i-1].Kind == svtoken.KindColonColon &&
+			(toks[i-2].Kind == svtoken.KindIdent || toks[i-2].Kind == svtoken.KindSystemIdent) {
 			occ.Qualifier = intern(toks[i-2].Text)
 		}
 		out = append(out, occ)

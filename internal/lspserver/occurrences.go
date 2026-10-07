@@ -12,7 +12,7 @@ import (
 // wide for a module/class/package/etc., restricted to the enclosing
 // module/interface/program's span when that's a safe restriction,
 // workspace-wide minus provably unrelated same-named tokens for a package
-// member, and workspace-wide otherwise). This queries pre-built index data: no disk
+// member or file-scope declaration, and workspace-wide otherwise). This queries pre-built index data: no disk
 // I/O or re-tokenizing happens here, however large the workspace, since
 // Index.SetFile already did that work when the file was last scanned (at
 // startup, on open/change, or via the file watcher).

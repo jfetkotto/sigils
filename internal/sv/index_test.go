@@ -2383,3 +2383,85 @@ func TestScopedOccurrencesLocalParamExcludesChildOverrideName(t *testing.T) {
 		t.Fatalf("expected declaration and (P) use, got %+v", locs)
 	}
 }
+
+// fileScopeFixture is a file-scope typedef T plus every shape of same-named
+// token the occurrence filter must either drop or keep for it.
+func fileScopeFixture() *Index {
+	ix := NewIndex()
+	ix.SetFile("file:///defs.sv", "typedef logic [7:0] T;\n")
+	ix.SetFile("file:///m1.sv", "module m1 #(parameter int T = 0) ();\n  localparam int Z = T;\nendmodule\n")
+	ix.SetFile("file:///m2.sv", "module m2;\n  m1 #(.T(1)) u ();\n  initial a.T = 1;\n  localparam int B = other::T;\n  T x;\nendmodule\n")
+	ix.SetFile("file:///other.sv", "package other;\n  localparam int T = 2;\nendpackage\n")
+	ix.SetFile("file:///m3.sv", "module m3;\n  localparam int T = 3;\n  $unit::T y;\n  T z;\nendmodule\n")
+	// A second file-scope T, as an `ifdef variant would be.
+	ix.SetFile("file:///alt.sv", "typedef int T;\nmodule m4;\n  T w;\nendmodule\n")
+	return ix
+}
+
+func TestScopedOccurrencesFileScopeDropsProvablyUnrelated(t *testing.T) {
+	got := pkgMemberLines(fileScopeFixture().ScopedOccurrences("file:///defs.sv", 0, 20, "T", "", false))
+
+	for _, uri := range []string{"file:///m1.sv", "file:///other.sv"} {
+		if len(got[uri]) != 0 {
+			t.Errorf("%s: shadowed/other-package T must be dropped, got %v", uri, got[uri])
+		}
+	}
+	// m2.sv: .T( connection (1), a.T (2), other::T (3) dropped; bare T (4) kept.
+	if m2 := got["file:///m2.sv"]; len(m2) != 1 || m2[0] != 4 {
+		t.Errorf("m2.sv: expected only line 4, got %v", m2)
+	}
+	// m3.sv: local T (1) and its bare use (3) dropped; $unit::T (2) kept.
+	if m3 := got["file:///m3.sv"]; len(m3) != 1 || m3[0] != 2 {
+		t.Errorf("m3.sv: expected only the $unit::T on line 2, got %v", m3)
+	}
+}
+
+func TestScopedOccurrencesFileScopeKeepsOtherFileScopeVariant(t *testing.T) {
+	got := pkgMemberLines(fileScopeFixture().ScopedOccurrences("file:///defs.sv", 0, 20, "T", "", false))
+	// Another file's file-scope T is never treated as shadowing: it may be
+	// the same symbol under a different `ifdef.
+	if alt := got["file:///alt.sv"]; len(alt) != 2 || alt[0] != 0 || alt[1] != 2 {
+		t.Errorf("alt.sv: expected lines 0 and 2 kept, got %v", alt)
+	}
+	if d := got["file:///defs.sv"]; len(d) != 1 || d[0] != 0 {
+		t.Errorf("defs.sv: expected the declaration kept, got %v", d)
+	}
+}
+
+func TestScopedOccurrencesFileScopeKeepsPackageQualifiedViaInclude(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"hdr.svh": "typedef int H;\n"}}
+	})
+	ix.SetFile("file:///pkg.sv", "package pkg;\n`include \"hdr.svh\"\nendpackage\n")
+	ix.SetFile("file:///use.sv", "module u;\n  pkg::H a;\n  localparam int H = 1;\n  H b;\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///hdr.svh", 0, 12, "H", "", false))
+	// pkg::H reaches the header's file-scope H through the include; the
+	// module-local H and its use are a different symbol.
+	if u := got["file:///use.sv"]; len(u) != 1 || u[0] != 1 {
+		t.Errorf("use.sv: expected only pkg::H on line 1, got %v", u)
+	}
+}
+
+func TestOccurrencesInFileFileScopeDropsShadowed(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef int T;\nmodule k #(parameter int T = 0) ();\nendmodule\nmodule j;\n  T v;\nendmodule\n")
+
+	var lines []int
+	for _, l := range ix.OccurrencesInFile("file:///a.sv", 0, 12, "T", "", false) {
+		lines = append(lines, l.Line)
+	}
+	if len(lines) != 2 || lines[0] != 0 || lines[1] != 4 {
+		t.Fatalf("expected lines 0 and 4 (k's parameter dropped), got %v", lines)
+	}
+}
+
+func TestOccurrenceRecordsUnitQualifier(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module m;\n  $unit::T y;\nendmodule\n")
+	occs := ix.occByName["T"]["file:///a.sv"]
+	if len(occs) != 1 || occs[0].Qualifier != "$unit" {
+		t.Fatalf("expected one T occurrence qualified by $unit, got %+v", occs)
+	}
+}
