@@ -286,14 +286,11 @@ func (s *Server) resolveWordAt(
 	}
 
 	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
-		if loc, ok := s.structFieldLocation(uri, text, line, character, receiver, receiverStart, word); ok {
-			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
-		}
-		if loc, ok := s.interfaceMemberLocation(uri, text, line, character, receiver, receiverStart, word); ok {
-			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
-		}
-		if loc, ok := s.modportLocation(uri, text, line, character, receiver, receiverStart, word); ok {
-			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+		recvQualifier, recvHasQualifier := sv.QualifierAt(text, line, receiverStart)
+		if recv, ok := s.index.HoverInfo(uri, line, character, receiver, recvQualifier, recvHasQualifier); ok {
+			if loc, ok := s.memberLocation(&recv, word); ok {
+				return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+			}
 		}
 	}
 
@@ -306,6 +303,26 @@ func (s *Server) resolveWordAt(
 	return formatLocations(locs, word), nil
 }
 
+// memberLocation resolves "receiver.word" to word's declaration, given
+// receiver's own resolved declaration: a struct/union field first, then an
+// interface member, then a modport.
+//
+// The caller resolves receiver once and hands it to every lookup here,
+// rather than each lookup resolving it again: a receiver that turns out not
+// to be a struct (an interface instance, or a hierarchical reference
+// matching nothing) used to be resolved once per candidate kind. Scope
+// resolution for it uses the original cursor position, not receiver's own
+// column, the same as every other lookup from this position.
+func (s *Server) memberLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if loc, ok := s.structFieldLocation(recv, word); ok {
+		return loc, true
+	}
+	if loc, ok := s.interfaceMemberLocation(recv, word); ok {
+		return loc, true
+	}
+	return s.modportLocation(recv, word)
+}
+
 // structFieldLocation resolves "receiver.word" to the field's own
 // declaration inside its struct/union typedef, mirroring structFieldHover
 // on the query side.
@@ -316,10 +333,8 @@ func (s *Server) resolveWordAt(
 // through the receiver's type, so on "link.addr" where some unrelated
 // module also declares a port "addr", hover was right and F12 jumped into
 // the unrelated module -- silently wrong rather than simply empty.
-func (s *Server) structFieldLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) structFieldLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if recv.TypeName == "" {
 		return sv.Location{}, false
 	}
 	return s.index.StructFieldLocation(recv.TypeName, word)
@@ -333,10 +348,8 @@ func (s *Server) structFieldLocation(uri, text string, line, character int, rece
 // interface member's own Declaration already carries a real position, so
 // this needs no analogue of struct-field goto-definition's missing-target
 // problem.
-func (s *Server) interfaceMemberLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) interfaceMemberLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if recv.TypeName == "" {
 		return sv.Location{}, false
 	}
 	locs, ok := s.index.FindInterfaceMember(recv.TypeName, word)
@@ -351,10 +364,8 @@ func (s *Server) interfaceMemberLocation(uri, text string, line, character int, 
 // except gated on recv.Kind == KindInterface rather than recv.TypeName !=
 // "", since an interface name IS a type (it has none of its own to point
 // at).
-func (s *Server) modportLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.Kind != sv.KindInterface {
+func (s *Server) modportLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if recv.Kind != sv.KindInterface {
 		return sv.Location{}, false
 	}
 	locs, ok := s.index.FindModport(recv.Name, word)

@@ -52,14 +52,11 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 	}
 
 	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
-		if hover, ok := s.structFieldHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
-			return hover, nil
-		}
-		if hover, ok := s.interfaceMemberHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
-			return hover, nil
-		}
-		if hover, ok := s.modportHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
-			return hover, nil
+		recvQualifier, recvHasQualifier := sv.QualifierAt(text, line, receiverStart)
+		if recv, ok := s.index.HoverInfo(params.TextDocument.URI, line, character, receiver, recvQualifier, recvHasQualifier); ok {
+			if hover, ok := s.memberHover(&recv, word); ok {
+				return hover, nil
+			}
 		}
 	}
 
@@ -75,11 +72,25 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 	}, nil
 }
 
-// structFieldHover resolves receiver (the identifier immediately before a
-// "." that itself immediately precedes word, see sv.DotReceiverAt) to its
-// declared type and, if that type is a struct/union typedef with a field
-// named word, renders hover text for that field specifically. ok is false
-// whenever this doesn't apply (receiver doesn't resolve, isn't
+// memberHover renders hover text for "receiver.word", given receiver's own
+// resolved declaration: a struct/union field first, then an interface
+// member, then a modport. See memberLocation for why receiver is resolved
+// once by the caller.
+func (s *Server) memberHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if hover, ok := s.structFieldHover(recv, word); ok {
+		return hover, true
+	}
+	if hover, ok := s.interfaceMemberHover(recv, word); ok {
+		return hover, true
+	}
+	return s.modportHover(recv, word)
+}
+
+// structFieldHover takes receiver's resolved declaration (receiver being
+// the identifier immediately before a "." that itself immediately precedes
+// word, see sv.DotReceiverAt) and, if its declared type is a struct/union
+// typedef with a field named word, renders hover text for that field
+// specifically. ok is false whenever this doesn't apply (receiver isn't
 // struct/union-typed, or has no field named word) -- the caller then
 // falls back to HoverInfo's plain scope-chain lookup for word, same as
 // before this existed. That fallback matters: field-access reference
@@ -88,10 +99,8 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 // silently land on an unrelated declaration that merely happens to share
 // the field's name (the same "coincidence" struct-member completion had
 // before sv.Index.StructFields, reused here).
-func (s *Server) structFieldHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) structFieldHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if recv.TypeName == "" {
 		return nil, false
 	}
 	fields, ok := s.index.StructFields(recv.TypeName)
@@ -116,10 +125,8 @@ func (s *Server) structFieldHover(uri, text string, line, character int, receive
 // already failed: recv.TypeName might name either a struct/union typedef or
 // an interface, and StructFields already reports "not found" cleanly for
 // the latter.
-func (s *Server) interfaceMemberHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) interfaceMemberHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if recv.TypeName == "" {
 		return nil, false
 	}
 	decl, ok := s.index.InterfaceMemberInfo(recv.TypeName, word)
@@ -135,10 +142,8 @@ func (s *Server) interfaceMemberHover(uri, text string, line, character int, rec
 // receiver's own interface, mirroring structFieldHover -- except gated on
 // recv.Kind == KindInterface rather than recv.TypeName != "", since an
 // interface name IS a type (it has none of its own to point at).
-func (s *Server) modportHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.Kind != sv.KindInterface {
+func (s *Server) modportHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if recv.Kind != sv.KindInterface {
 		return nil, false
 	}
 	decl, ok := s.index.ModportInfo(recv.Name, word)
