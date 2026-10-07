@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/tliron/glsp"
@@ -14,8 +15,18 @@ import (
 	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
-const serverName = "sigils"
-const serverVersion = "0.0.1"
+// ServerName is the name sigils reports to the client and logs under.
+const ServerName = "sigils"
+
+// serverVersion is the module version this binary was built from, as the
+// Go toolchain recorded it: the release tag for "go install ...@vX.Y.Z",
+// "(devel)" for a build from a local checkout.
+func serverVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(devel)"
+}
 
 // Initialize finds the workspace root and its configuration, starts
 // indexing and file watching in the background, and reports the server's
@@ -81,7 +92,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 
 	openClose := true
 	change := protocol.TextDocumentSyncKindFull
-	version := serverVersion
+	version := serverVersion()
 
 	return protocol.InitializeResult{
 		Capabilities: protocol.ServerCapabilities{
@@ -103,7 +114,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 			RenameProvider:            true,
 		},
 		ServerInfo: &protocol.InitializeResultServerInfo{
-			Name:    serverName,
+			Name:    ServerName,
 			Version: &version,
 		},
 	}, nil

@@ -12,8 +12,6 @@ import (
 	"github.com/jfetkotto/sigils/internal/lspserver"
 )
 
-const serverName = "sigils"
-
 func main() {
 	logFile := flag.String("log-file", "", "write logs to this file instead of stderr")
 	verbosity := flag.Int("verbosity", 1, "commonlog verbosity: -4 (none) through 2 (debug)")
@@ -25,7 +23,7 @@ func main() {
 	} else {
 		commonlog.Configure(*verbosity, nil)
 	}
-	log := commonlog.GetLogger(serverName)
+	log := commonlog.GetLogger(lspserver.ServerName)
 
 	srv := lspserver.NewServer(log)
 	// Every handler is wrapped so a panic becomes a logged error response
@@ -51,7 +49,7 @@ func main() {
 		TextDocumentRename:            lspserver.Guard(log, srv.TextDocumentRename),
 	}
 
-	glspServer := server.NewServer(handler, serverName, false)
+	glspServer := server.NewServer(handler, lspserver.ServerName, false)
 
 	// stdout is exclusively the JSON-RPC channel from here on; all logging
 	// goes through commonlog to stderr (or -log-file) instead.

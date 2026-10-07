@@ -1596,3 +1596,16 @@ func TestTextDocumentDefinitionFallsThroughWhenReceiverIsNotAStruct(t *testing.T
 		t.Fatalf("named port connection should still resolve to the port: %+v", locs)
 	}
 }
+
+func TestInitializeReportsTheBuildVersion(t *testing.T) {
+	s := newTestServer()
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
+	result, err := s.Initialize(nil, &protocol.InitializeParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := result.(protocol.InitializeResult).ServerInfo
+	if info == nil || info.Name != ServerName || info.Version == nil || *info.Version != serverVersion() || *info.Version == "" {
+		t.Fatalf("serverInfo = %+v, want name %q and version %q", info, ServerName, serverVersion())
+	}
+}
