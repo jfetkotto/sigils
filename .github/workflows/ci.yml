@@ -15,6 +15,12 @@ jobs:
       - run: go vet ./...
       - run: go mod tidy -diff
       - run: go test ./... -race
+      - name: Run each benchmark once
+        run: go test ./... -run '^$' -bench . -benchtime=1x
+      - name: Staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2026.2.1 ./...
+      - name: Govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
       - name: Check formatting
         run: |
           fmt_out="$(gofmt -l .)"
