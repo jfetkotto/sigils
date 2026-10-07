@@ -276,6 +276,7 @@ type Index struct {
 	initialMacros map[string]string
 }
 
+// NewIndex returns an empty Index.
 func NewIndex() *Index {
 	return &Index{
 		byURI:            make(map[string][]Declaration),
@@ -462,16 +463,6 @@ func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 	}
 }
 
-// recordMemberLinksLocked replaces owner's contribution to the cross-
-// `include membership maps with links, retracting whatever its previous
-// scan contributed first. Retraction is bounded by owner's own link count
-// rather than the workspace's, since memberLinksByOwner already names the
-// exact keys to revisit -- this runs on every keystroke, via SetFile.
-//
-// Entries from *other* owners are deliberately left in place: two files
-// including the same header into the same container each record the link,
-// and one of them being rescanned (or losing its `include) says nothing
-// about the other.
 // recordContributionsLocked records that owner's latest scan backs exactly
 // the URIs in produced, and retracts whatever its previous scan backed and
 // this one does not. A URI left with no contributor at all has its buckets
@@ -517,6 +508,16 @@ func (ix *Index) recordContributionsLocked(owner string, produced map[string]boo
 	return dropped
 }
 
+// recordMemberLinksLocked replaces owner's contribution to the cross-
+// `include membership maps with links, retracting whatever its previous
+// scan contributed first. Retraction is bounded by owner's own link count
+// rather than the workspace's, since memberLinksByOwner already names the
+// exact keys to revisit -- this runs on every keystroke, via SetFile.
+//
+// Entries from *other* owners are deliberately left in place: two files
+// including the same header into the same container each record the link,
+// and one of them being rescanned (or losing its `include) says nothing
+// about the other.
 func (ix *Index) recordMemberLinksLocked(owner string, links []memberLink) {
 	for _, l := range ix.memberLinksByOwner[owner] {
 		key := declRef{uri: l.ContainerURI, idx: l.ContainerIdx}
@@ -780,8 +781,9 @@ func (ix *Index) locationsLocked(refs []declRef) []Location {
 // Lookup returns every known location declaring name, with no scope
 // awareness -- a flat, global search. FindDefinition is almost always the
 // better choice for resolving a reference at a specific position; Lookup
-// remains useful for tooling that just wants "does this name exist
-// anywhere" (tests, future features like workspace symbol search).
+// remains useful where any declaration site at all is the question:
+// find-references uses it to drop declaration sites when the client asks
+// for references without them.
 func (ix *Index) Lookup(name string) ([]Location, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()

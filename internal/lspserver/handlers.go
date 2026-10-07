@@ -17,6 +17,10 @@ import (
 const serverName = "sigils"
 const serverVersion = "0.0.1"
 
+// Initialize finds the workspace root and its configuration, starts
+// indexing and file watching in the background, and reports the server's
+// capabilities.
+//
 // glspCtx (not "context" -- shadowing the stdlib context package used
 // below for the background indexing goroutine) carries Notify, captured
 // once via setNotify so publishDiagnostics can push
@@ -118,11 +122,15 @@ func clientSupportsSnippets(params *protocol.InitializeParams) bool {
 	return support != nil && *support
 }
 
+// Initialized handles the client's initialized notification. There is
+// nothing left to do by then: Initialize already started indexing.
 func (s *Server) Initialized(_ *glsp.Context, params *protocol.InitializedParams) error {
 	s.Log.Info("initialized")
 	return nil
 }
 
+// Shutdown records that shutdown was requested (see ShutdownReceived) and
+// stops the background indexer and file watcher.
 func (s *Server) Shutdown(_ *glsp.Context) error {
 	s.mu.Lock()
 	s.shutdownReceived = true
@@ -135,11 +143,15 @@ func (s *Server) Shutdown(_ *glsp.Context) error {
 	return nil
 }
 
+// SetTrace applies the client's $/setTrace level to glsp's protocol
+// tracing.
 func (s *Server) SetTrace(_ *glsp.Context, params *protocol.SetTraceParams) error {
 	protocol.SetTraceValue(params.Value)
 	return nil
 }
 
+// TextDocumentDidOpen stores the opened buffer and, for a file:// URI,
+// indexes its text in place of whatever was scanned from disk.
 func (s *Server) TextDocumentDidOpen(_ *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
 	doc := params.TextDocument
 	s.docs.Open(document.URI(doc.URI), doc.LanguageID, doc.Version, doc.Text)
@@ -153,6 +165,7 @@ func (s *Server) TextDocumentDidOpen(_ *glsp.Context, params *protocol.DidOpenTe
 	return nil
 }
 
+// TextDocumentDidChange replaces an open buffer's text and reindexes it.
 func (s *Server) TextDocumentDidChange(_ *glsp.Context, params *protocol.DidChangeTextDocumentParams) error {
 	if len(params.ContentChanges) == 0 {
 		return nil
@@ -182,6 +195,8 @@ func (s *Server) TextDocumentDidChange(_ *glsp.Context, params *protocol.DidChan
 	return nil
 }
 
+// TextDocumentDidClose forgets a closed buffer and reindexes the file from
+// disk, since the buffer may have held unsaved edits.
 func (s *Server) TextDocumentDidClose(_ *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
 	uri := params.TextDocument.URI
 	s.docs.Close(document.URI(uri))

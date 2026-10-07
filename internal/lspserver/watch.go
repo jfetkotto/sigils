@@ -195,8 +195,8 @@ func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 // files' own next edit. Scoped to the on-disk/save path only (this is
 // watchFiles' own debounced tick), not live didChange keystrokes -- an
 // unsaved edit to a widely-included header doesn't synchronously re-scan
-// every dependent on every keystroke, a deliberate, documented tradeoff
-// (see the Phase 4 plan).
+// every dependent on every keystroke. That is a deliberate tradeoff: the
+// dependents catch up when the header is saved.
 //
 // One pass over each changed URI's own Dependents is enough, with no
 // further transitive cascade: sv.Index.Dependents(uri) already returns

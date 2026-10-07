@@ -58,6 +58,8 @@ type Server struct {
 	watchDebounce time.Duration
 }
 
+// NewServer returns a Server with an empty index, logging to log. Nothing
+// is indexed until Initialize runs.
 func NewServer(log commonlog.Logger) *Server {
 	return &Server{
 		Log:       log,
@@ -96,12 +98,16 @@ func (s *Server) Discoverer() workspace.Discoverer {
 	return s.discoverer
 }
 
+// ShutdownReceived reports whether a shutdown request has been handled,
+// which decides the process exit code after exit.
 func (s *Server) ShutdownReceived() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.shutdownReceived
 }
 
+// SnippetSupport reports whether the client said, at Initialize, that it
+// accepts snippet-format completion items.
 func (s *Server) SnippetSupport() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

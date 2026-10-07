@@ -82,6 +82,7 @@ var kindNames = [...]string{
 	KindModport:    "modport",
 }
 
+// String returns the kind's name as hover text shows it, e.g. "module".
 func (k Kind) String() string {
 	if int(k) < len(kindNames) {
 		return kindNames[k]

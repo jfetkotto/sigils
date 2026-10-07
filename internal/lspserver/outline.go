@@ -21,8 +21,8 @@ func (s *Server) TextDocumentDocumentSymbol(_ *glsp.Context, params *protocol.Do
 
 // childIndex buckets decls by Parent once, so documentSymbolTree can find a
 // declaration's children by lookup instead of rescanning the whole slice.
-// children[i] holds the indices parented to i; roots (Parent == -1) come
-// back separately, since there's no bucket to hold them.
+// children[i] holds the indices parented to i; roots (Parent == -1) have
+// no bucket, so documentSymbolTree finds those by scanning for them.
 //
 // Without this the tree build is quadratic: it rescanned every declaration
 // in the file once per declaration, including the ports, variables and

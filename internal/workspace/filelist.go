@@ -49,10 +49,15 @@ func NewFilelistDiscoverer(root Root, cfg Config, warn func(string)) *FilelistDi
 	return &FilelistDiscoverer{root: root, cfg: cfg, warn: warn}
 }
 
+// Roots returns the single workspace root the discoverer was built for.
 func (d *FilelistDiscoverer) Roots(ctx context.Context) ([]Root, error) {
 	return []Root{d.root}, nil
 }
 
+// Files expands the configured filelists under root and returns every
+// source file they reach, deduplicated by resolved path. It also captures
+// the filelists visited and the +incdir+ and +define+ entries seen, for
+// VisitedFilelists, IncludeDirs and Defines.
 func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile, error) {
 	st := &discoveryState{
 		seenFilelists:   make(map[string]bool),

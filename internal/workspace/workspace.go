@@ -52,14 +52,17 @@ type StaticDiscoverer struct {
 	roots []Root
 }
 
+// NewStaticDiscoverer returns a StaticDiscoverer reporting roots.
 func NewStaticDiscoverer(roots []Root) *StaticDiscoverer {
 	return &StaticDiscoverer{roots: roots}
 }
 
+// Roots returns the roots given to NewStaticDiscoverer.
 func (d *StaticDiscoverer) Roots(ctx context.Context) ([]Root, error) {
 	return d.roots, nil
 }
 
+// Files returns no files: a StaticDiscoverer has no filelists to expand.
 func (d *StaticDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile, error) {
 	return nil, nil
 }
