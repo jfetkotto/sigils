@@ -1961,6 +1961,26 @@ func BenchmarkWorkspaceSymbolsEmptyQuery(b *testing.B) {
 	}
 }
 
+// A short prefix that every one of 50k names matches: completion's worst
+// case, and the one an editor hits on the first character typed.
+func BenchmarkCompleteSymbolsWidePrefix(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.CompleteSymbols("mod_", 200)
+	}
+}
+
+// A prefix only a handful of 50k names match, so the cost is finding them
+// rather than ranking them.
+func BenchmarkCompleteSymbolsNarrowPrefix(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.CompleteSymbols("mod_4999", 200)
+	}
+}
+
 // The reported collision: a struct field whose name is also an unrelated
 // module's port. Before ScopedOccurrencesForStructField the field query
 // resolved to nothing and fell back to the unscoped, name-wide list, so
