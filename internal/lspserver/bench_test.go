@@ -271,7 +271,8 @@ func BenchmarkDefinitionWideModule(b *testing.B) {
 }
 
 // Saving a header every module includes: each includer is reread from
-// disk and rescanned.
+// disk and rescanned. Each file holds ten modules (about 1,100 lines), so
+// scanning outweighs the per-file open, as it does in a real workspace.
 func BenchmarkCascadeHeaderSave(b *testing.B) {
 	dir := b.TempDir()
 	s := newTestServer()
@@ -282,11 +283,15 @@ func BenchmarkCascadeHeaderSave(b *testing.B) {
 	}
 	for i := range benchFiles {
 		path := filepath.Join(dir, fmt.Sprintf("blk%d.sv", i))
-		src := "`include \"hdr.svh\"\n" + benchModule(i)
-		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		var src strings.Builder
+		src.WriteString("`include \"hdr.svh\"\n")
+		for j := range 10 {
+			src.WriteString(benchModule(i*10 + j))
+		}
+		if err := os.WriteFile(path, []byte(src.String()), 0o644); err != nil {
 			b.Fatal(err)
 		}
-		s.index.SetFile(pathToURI(path), src)
+		s.index.SetFile(pathToURI(path), src.String())
 	}
 	changed := []string{pathToURI(hdr)}
 	b.ResetTimer()
