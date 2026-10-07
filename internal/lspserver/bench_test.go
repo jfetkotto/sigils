@@ -1,6 +1,7 @@
 package lspserver
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -296,7 +297,7 @@ func BenchmarkCascadeHeaderSave(b *testing.B) {
 	changed := []string{pathToURI(hdr)}
 	b.ResetTimer()
 	for range b.N {
-		s.cascadeReindexDependents(changed)
+		s.cascadeReindexDependents(context.Background(), changed)
 	}
 }
 

@@ -52,64 +52,64 @@ func (s *Server) buildIndex(ctx context.Context, discoverer workspace.Discoverer
 
 	// Reading and scanning are per-file independent, so fan out across
 	// the CPUs -- on a company-sized workspace a serial scan makes startup
-	// noticeably slow. Index.SetFile is thread-safe, and its tokenize pass
-	// (the expensive part) runs before it takes the index lock. ctx is
-	// checked per file so Shutdown doesn't have to wait out a full scan;
-	// on cancellation the returned file list can exceed what was actually
-	// indexed, which is fine because cancellation only happens at
-	// shutdown, when the caller is about to exit anyway.
-	work := make(chan workspace.SourceFile)
+	// noticeably slow. On cancellation the returned file list can exceed
+	// what was actually indexed, which is fine because cancellation only
+	// happens at shutdown, when the caller is about to exit anyway.
 	var indexed atomic.Int64
-	var wg sync.WaitGroup
-	for range runtime.GOMAXPROCS(0) {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for file := range work {
-				if ctx.Err() != nil {
-					continue // keep draining so the feed loop can't block
-				}
-				uri := pathToURI(file.LogicalPath)
-				if _, open := s.docs.Get(document.URI(uri)); open {
-					// The live editor buffer is authoritative while open
-					// (same reasoning as syncFromDisk/removeStaleFiles) --
-					// but this rebuild pass can be running because a
-					// filelist edit just changed the workspace's
-					// `+incdir+`/`+define+` (the resolver factory/initial
-					// macros wired in above), which an open file's index
-					// entry needs to reflect too. So its text still comes
-					// from the buffer, never disk, but it's re-scanned
-					// through SetFile like everything else rather than
-					// left untouched with whatever config was active at
-					// its last keystroke.
-					s.scanOpenBuffer(uri)
-					indexed.Add(1)
-					continue
-				}
-				data, err := os.ReadFile(file.ResolvedPath)
-				if err != nil {
-					s.Log.Warningf("indexing: could not read %s: %s", file.ResolvedPath, err)
-					continue
-				}
-				s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-				indexed.Add(1)
-			}
-		}()
-	}
-
-feed:
-	for _, file := range all {
-		select {
-		case work <- file:
-		case <-ctx.Done():
-			break feed
+	forEachParallel(ctx, len(all), func(i int) {
+		file := all[i]
+		uri := pathToURI(file.LogicalPath)
+		// The live editor buffer is authoritative while open (same
+		// reasoning as syncFromDisk/removeStaleFiles) -- but this rebuild
+		// pass can be running because a filelist edit just changed the
+		// workspace's `+incdir+`/`+define+` (the resolver factory/initial
+		// macros wired in above), which an open file's index entry needs
+		// to reflect too. So its text still comes from the buffer, never
+		// disk, but it's re-scanned through SetFile like everything else
+		// rather than left untouched with whatever config was active at
+		// its last keystroke.
+		if s.scanOpenBuffer(uri) {
+			indexed.Add(1)
+			return
 		}
-	}
-	close(work)
-	wg.Wait()
+		data, err := os.ReadFile(file.ResolvedPath)
+		if err != nil {
+			s.Log.Warningf("indexing: could not read %s: %s", file.ResolvedPath, err)
+			return
+		}
+		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
+		indexed.Add(1)
+	})
 
 	s.Log.Infof("indexed %d source file(s)", indexed.Load())
 	return all
+}
+
+// forEachParallel calls fn(i) for every i in [0, n), spread across
+// GOMAXPROCS goroutines, and returns once every call has finished. Every
+// bulk rescan (startup indexing, include discovery, the watcher's
+// debounced batch and the cascade after a header save) goes through it:
+// each file's read and scan is independent of the others, Index.SetFile is
+// thread-safe, and its tokenize pass (the expensive part) runs before it
+// takes the index lock.
+//
+// Cancelling ctx stops new calls from starting, so Shutdown never has to
+// wait out a full pass; calls already running finish.
+func forEachParallel(ctx context.Context, n int, fn func(i int)) {
+	var next atomic.Int64
+	var wg sync.WaitGroup
+	for range min(runtime.GOMAXPROCS(0), n) {
+		wg.Go(func() {
+			for ctx.Err() == nil {
+				i := int(next.Add(1)) - 1
+				if i >= n {
+					return
+				}
+				fn(i)
+			}
+		})
+	}
+	wg.Wait()
 }
 
 // indexAndWatch builds the index and then watches the discovered files
@@ -185,34 +185,47 @@ func (s *Server) scanIncludeDiscoveredFiles(ctx context.Context, discovered []wo
 		reachable = append(reachable, s.index.IncludesOf(uri)...)
 	}
 
-	var extra []workspace.SourceFile
+	var candidates []string
 	for _, uri := range reachable {
 		if known[uri] {
 			continue // e.g. two top-level files `include the same header
 		}
 		known[uri] = true
-		if ctx.Err() != nil {
-			break
-		}
+		candidates = append(candidates, uri)
+	}
+
+	// scanned[i] is candidates[i]'s path once it has been indexed, and ""
+	// if it wasn't, so the result keeps candidates' order however the
+	// workers interleave.
+	scanned := make([]string, len(candidates))
+	forEachParallel(ctx, len(candidates), func(i int) {
+		uri := candidates[i]
 		path, err := uriToPath(uri)
 		if err != nil {
-			continue
+			return
 		}
 		// Same "buffer text, but still re-scanned through SetFile"
-		// treatment as the worker pool above -- an `include d file can
-		// also be directly open in the editor, and this pass's
-		// resolver/macro config may have just changed.
+		// treatment as buildIndex -- an `include d file can also be
+		// directly open in the editor, and this pass's resolver/macro
+		// config may have just changed.
 		if s.scanOpenBuffer(uri) {
-			extra = append(extra, workspace.SourceFile{LogicalPath: path, ResolvedPath: path})
-			continue
+			scanned[i] = path
+			return
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
 			s.Log.Warningf("indexing: could not read %s (discovered via `include): %s", path, err)
-			continue
+			return
 		}
 		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-		extra = append(extra, workspace.SourceFile{LogicalPath: path, ResolvedPath: path})
+		scanned[i] = path
+	})
+
+	var extra []workspace.SourceFile
+	for _, path := range scanned {
+		if path != "" {
+			extra = append(extra, workspace.SourceFile{LogicalPath: path, ResolvedPath: path})
+		}
 	}
 	return extra
 }

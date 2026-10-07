@@ -478,3 +478,32 @@ func TestWatchFilesTreatsRenameBasedSaveAsAChangeNotARemoval(t *testing.T) {
 	cancel()
 	waitForWatch(t, done)
 }
+
+// A cascade runs inside the watcher's event loop and can cover thousands of
+// files, so a cancelled context (Shutdown) has to stop it rather than let
+// it run to the end.
+func TestCascadeReindexDependentsStopsWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	hdr := filepath.Join(dir, "hdr.svh")
+	dep := filepath.Join(dir, "top.sv")
+	writeFileT(t, hdr, "typedef logic [7:0] byte_t;\n")
+	writeFileT(t, dep, "`include \"hdr.svh\"\nmodule old_name;\nendmodule\n")
+
+	s := newTestServer()
+	s.index.SetIncludeResolverFactory(newIncludeResolverFactory(nil))
+	s.index.SetFile(pathToURI(dep), "`include \"hdr.svh\"\nmodule old_name;\nendmodule\n")
+	writeFileT(t, dep, "`include \"hdr.svh\"\nmodule new_name;\nendmodule\n")
+	changed := []string{pathToURI(hdr)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.cascadeReindexDependents(ctx, changed)
+	if _, ok := s.index.Lookup("new_name"); ok {
+		t.Fatalf("a cancelled cascade still rescanned the dependent")
+	}
+
+	s.cascadeReindexDependents(context.Background(), changed)
+	if _, ok := s.index.Lookup("new_name"); !ok {
+		t.Fatalf("the cascade did not rescan the header's dependent")
+	}
+}

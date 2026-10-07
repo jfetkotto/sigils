@@ -140,13 +140,17 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 			if rebuildPending {
 				return true
 			}
+			eventPaths := make([]string, 0, len(pending))
 			changed := make([]string, 0, len(pending))
 			for eventPath, logicalPath := range pending {
-				s.syncFromDisk(eventPath, logicalPath)
+				eventPaths = append(eventPaths, eventPath)
 				changed = append(changed, pathToURI(logicalPath))
 			}
+			forEachParallel(ctx, len(eventPaths), func(i int) {
+				s.syncFromDisk(eventPaths[i], pending[eventPaths[i]])
+			})
 			clear(pending)
-			s.cascadeReindexDependents(changed)
+			s.cascadeReindexDependents(ctx, changed)
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
@@ -201,20 +205,27 @@ func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 // includes into the same resolver instance) -- so if Z includes X which
 // includes Y, Z's own last scan already recorded Y as a dependency too,
 // and Dependents(Y) already lists Z directly, not just X.
-func (s *Server) cascadeReindexDependents(changed []string) {
+//
+// The dependents are rescanned in parallel (see forEachParallel): a header
+// every module includes can have thousands of them, and this runs inside
+// watchFiles' event loop, so every other file event waits for it. ctx is
+// watchFiles' own, so Shutdown interrupts a long cascade too.
+func (s *Server) cascadeReindexDependents(ctx context.Context, changed []string) {
 	seen := make(map[string]bool, len(changed))
 	for _, uri := range changed {
 		seen[uri] = true
 	}
+	var deps []string
 	for _, uri := range changed {
 		for _, dep := range s.index.Dependents(uri) {
 			if seen[dep] {
 				continue
 			}
 			seen[dep] = true
-			s.reindexURI(dep)
+			deps = append(deps, dep)
 		}
 	}
+	forEachParallel(ctx, len(deps), func(i int) { s.reindexURI(deps[i]) })
 }
 
 // reindexURI re-scans uri -- from its open editor buffer if it has one,
