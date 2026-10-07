@@ -725,18 +725,23 @@ func initializeSearchStart(params *protocol.InitializeParams) string {
 	return "."
 }
 
+// workspaceRoots lists the client's workspace folders, falling back to the
+// deprecated singular rootUri, as roots. A folder whose URI isn't a
+// file:// path is left out rather than recorded with an empty Path.
 func workspaceRoots(params *protocol.InitializeParams) []workspace.Root {
 	if len(params.WorkspaceFolders) > 0 {
 		roots := make([]workspace.Root, 0, len(params.WorkspaceFolders))
 		for _, folder := range params.WorkspaceFolders {
-			path, _ := uriToPath(folder.URI)
-			roots = append(roots, workspace.Root{URI: folder.URI, Path: path})
+			if path, err := uriToPath(folder.URI); err == nil {
+				roots = append(roots, workspace.Root{URI: folder.URI, Path: path})
+			}
 		}
 		return roots
 	}
 	if params.RootURI != nil {
-		path, _ := uriToPath(*params.RootURI)
-		return []workspace.Root{{URI: *params.RootURI, Path: path}}
+		if path, err := uriToPath(*params.RootURI); err == nil {
+			return []workspace.Root{{URI: *params.RootURI, Path: path}}
+		}
 	}
 	return nil
 }

@@ -54,7 +54,7 @@ func main() {
 	// stdout is exclusively the JSON-RPC channel from here on; all logging
 	// goes through commonlog to stderr (or -log-file) instead.
 	if err := glspServer.RunStdio(); err != nil {
-		log.Errorf("server error: %s", err.Error())
+		log.Errorf("server error: %v", err)
 		os.Exit(1)
 	}
 
