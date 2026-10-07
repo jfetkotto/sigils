@@ -2053,6 +2053,34 @@ func TestSetFileRetractsAnIncludeThatIsNoLongerThere(t *testing.T) {
 	}
 }
 
+// A named connection inside a dropped header must stop counting as a
+// reference to the port it connects, or renaming the port writes an edit
+// into a file the build no longer reads.
+func TestSetFileRetractsConnectionSitesOfADroppedInclude(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"inst.svh": "leaf u0 (.clk(c));\n"}}
+	})
+	ix.SetFile("file:///leaf.sv", "module leaf(input logic clk);\nendmodule\n")
+	ix.SetFile("file:///top.sv", "module top;\n`include \"inst.svh\"\nendmodule\n")
+
+	inHeader := func() bool {
+		return slices.ContainsFunc(ix.ScopedOccurrencesForInstantiationConnection("leaf", "clk"), func(l Location) bool {
+			return l.URI == "file:///inst.svh"
+		})
+	}
+	if !inHeader() {
+		t.Fatalf("expected the header's connection site while the include is present")
+	}
+
+	ix.SetFile("file:///top.sv", "module top;\nendmodule\n")
+
+	if inHeader() {
+		t.Fatalf("the dropped header's connection site still counts as a reference: %+v",
+			ix.ScopedOccurrencesForInstantiationConnection("leaf", "clk"))
+	}
+}
+
 // A header two files include must survive one of them dropping it.
 func TestSetFileKeepsAnIncludeAnotherFileStillHas(t *testing.T) {
 	ix := NewIndex()

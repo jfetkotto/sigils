@@ -421,11 +421,7 @@ func (ix *Index) recordContributionsLocked(owner string, produced map[string]boo
 		// arrived through an `include this file no longer has must stop
 		// resolving, or goto-definition keeps opening a header the build
 		// no longer reads.
-		ix.removeDeclarationsLocked(prev)
-		delete(ix.byURI, prev)
-		delete(ix.errByURI, prev)
-		delete(ix.importsByURI, prev)
-		delete(ix.connectionsByURI, prev)
+		ix.clearScanBucketsLocked(prev)
 		dropped = append(dropped, prev)
 	}
 
@@ -566,16 +562,24 @@ func (ix *Index) removeLocked(uri string) []string {
 			delete(ix.contributorsOf, uri)
 		}
 	}
-	ix.removeDeclarationsLocked(uri)
+	ix.clearScanBucketsLocked(uri)
 	ix.removeOccurrencesLocked(uri)
-	ix.removeConnectionsLocked(uri)
 	ix.recordMemberLinksLocked(uri, nil)
 	ix.recordDependenciesLocked(uri, nil)
-	delete(ix.byURI, uri)
+	return cleared
+}
+
+// clearScanBucketsLocked drops every bucket any scan can write for uri,
+// whether uri's own or one that reached it through an `include:
+// declarations, diagnostics, imports and connection sites, along with
+// their by-name indexes. Occurrences, member links and dependencies are
+// left alone, since only uri's own scan writes those.
+func (ix *Index) clearScanBucketsLocked(uri string) {
+	ix.removeDeclarationsLocked(uri)
+	ix.removeConnectionsLocked(uri)
 	delete(ix.errByURI, uri)
 	delete(ix.importsByURI, uri)
 	delete(ix.connectionsByURI, uri)
-	return cleared
 }
 
 // removeDeclarationsLocked drops uri's declaration entries only, leaving
