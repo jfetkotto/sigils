@@ -49,7 +49,13 @@ type Occurrence struct {
 	// would otherwise mean re-reading every candidate's file (see
 	// ScopedOccurrencesForStructField). Interned alongside Name, so a field
 	// accessed hundreds of times off one receiver costs one string.
-	Receiver  string
+	Receiver string
+	// Qualifier is the identifier this occurrence was written as a scoped
+	// member of ("pa_pkg" for the "X" in "pa_pkg::X"), "" when it isn't a
+	// "<ident>::<Name>" access. Recorded at scan time for the same reason
+	// as Receiver: filtering a workspace-wide candidate list by qualifier
+	// must not mean re-reading every candidate's file.
+	Qualifier string
 	Line      int
 	Character int
 }
@@ -1372,6 +1378,9 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 	d := ix.byURI[ref.uri][ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
+		if ix.isPackageMemberLocked(ref, d) {
+			return ix.packageMemberOccurrencesLocked(word, refs, ref, uri, line, character, uri)
+		}
 		return ix.occurrencesInFileLocked(word, uri)
 	}
 	if ref.uri != uri {
@@ -1465,7 +1474,11 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 //     connection sites already would. Without this, renaming a port from
 //     its declaration silently leaves every named connection to it (e.g.
 //     ".portName(" at another module's instantiation) stale.
-//   - Otherwise (a class/package member, or a file-scope declaration
+//   - If it resolves to a package member, the search stays workspace-wide
+//     but occurrences that provably cannot denote it are dropped (see
+//     packageMemberOccurrencesLocked): a blacklist, so anything ambiguous
+//     is kept.
+//   - Otherwise (a class member, or a file-scope declaration
 //     with no enclosing container) the search stays workspace-wide,
 //     because such a symbol might legitimately be referenced from another
 //     file via a Class::name/pkg::name qualifier, or (for a file-scope
@@ -1485,6 +1498,9 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	d := ix.byURI[ref.uri][ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
+		if ix.isPackageMemberLocked(ref, d) {
+			return ix.packageMemberOccurrencesLocked(word, refs, ref, uri, line, character, "")
+		}
 		return ix.occurrencesLocked(word)
 	}
 
@@ -1499,6 +1515,131 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, word, d.Kind)...)
 	}
 	return out
+}
+
+// isPackageMemberLocked reports whether d (the declaration ref points at)
+// is a non-container declaration whose parent is a package.
+func (ix *Index) isPackageMemberLocked(ref declRef, d Declaration) bool {
+	if GloballyReferenceableKinds[d.Kind] || d.Parent == -1 {
+		return false
+	}
+	return ix.byURI[ref.uri][d.Parent].Kind == KindPackage
+}
+
+// packageMemberOccurrencesLocked returns the workspace-wide occurrences of
+// name minus those the language proves are not references to the package
+// member refs resolved to. Only uri (when onlyURI is non-empty) is
+// searched, for document highlight.
+//
+// It is a blacklist on purpose: this index has no elaborator, so
+// re-resolving every candidate and keeping only matches could miss real
+// references, which is worse than a false one (especially for rename).
+// An occurrence is dropped only when:
+//
+//  1. it is a named connection site (".name("), which names the
+//     instantiated module's port/parameter, never a package member;
+//  2. it is a member select ("a.name");
+//  3. it is written "q::name" and q::name resolves, but not to the target
+//     (so q is another package, and any export of the target's package
+//     through q would make q::name resolve to the target and be kept);
+//  4. it is bare and the innermost enclosing scope that declares name at
+//     all declares only something other than the target, which by the
+//     LRM hides any imported or compilation-unit name. The file-scope rung
+//     is deliberately not consulted, since a same-named file-scope
+//     declaration in another file may just be an `ifdef variant.
+//
+// The query position and the declaration site are always kept.
+func (ix *Index) packageMemberOccurrencesLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int, onlyURI string) []Location {
+	targets := make(map[declRef]bool, len(refs))
+	for _, r := range refs {
+		targets[r] = true
+	}
+	d := ix.byURI[primary.uri][primary.idx]
+
+	bucket := ix.occByName[name]
+	uris := make([]string, 0, len(bucket))
+	for u := range bucket {
+		if onlyURI == "" || u == onlyURI {
+			uris = append(uris, u)
+		}
+	}
+	sort.Strings(uris)
+
+	type scopeKey struct {
+		uri   string
+		scope int
+	}
+	shadowed := make(map[scopeKey]bool)
+
+	var out []Location
+	for _, u := range uris {
+		var conn map[[2]int]bool
+		if sites := ix.connByName[name][u]; len(sites) > 0 {
+			conn = make(map[[2]int]bool, len(sites))
+			for _, s := range sites {
+				conn[[2]int{s.Line, s.Character}] = true
+			}
+		}
+		decls := ix.byURI[u]
+		for _, occ := range bucket[u] {
+			keep := true
+			switch {
+			case u == qURI && occ.Line == qLine && qChar >= occ.Character && qChar <= occ.Character+len(name):
+			case u == primary.uri && occ.Line == d.Line && occ.Character == d.Character:
+			case conn[[2]int{occ.Line, occ.Character}]:
+				keep = false
+			case occ.Receiver != "":
+				keep = false
+			case occ.Qualifier != "":
+				if qrefs, ok := ix.lookupQualifiedRefsLocked(occ.Qualifier, name); ok {
+					keep = false
+					for _, r := range qrefs {
+						if targets[r] {
+							keep = true
+							break
+						}
+					}
+				}
+			default:
+				key := scopeKey{u, innermostContaining(decls, occ.Line, occ.Character)}
+				sh, seen := shadowed[key]
+				if !seen {
+					sh = ix.shadowedByLocalLocked(u, key.scope, name, targets)
+					shadowed[key] = sh
+				}
+				keep = !sh
+			}
+			if keep {
+				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+			}
+		}
+	}
+	return out
+}
+
+// shadowedByLocalLocked walks outward from container scope in uri and
+// reports whether the first scope declaring name declares none of targets.
+// Finding a target, or nothing at all, reports false: only "found, and
+// provably a different declaration" counts. The file-scope rung is not
+// walked.
+func (ix *Index) shadowedByLocalLocked(uri string, scope int, name string, targets map[declRef]bool) bool {
+	decls := ix.byURI[uri]
+	for idx := scope; idx != -1; idx = decls[idx].Parent {
+		found := false
+		for i, d := range decls {
+			if d.Parent != idx || d.Name != name {
+				continue
+			}
+			if targets[declRef{uri: uri, idx: i}] {
+				return false
+			}
+			found = true
+		}
+		if found {
+			return true
+		}
+	}
+	return false
 }
 
 // containerScopeLocked returns d's enclosing container and whether it's

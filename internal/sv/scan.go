@@ -852,6 +852,10 @@ func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 		if i >= 2 && toks[i-1].Kind == svtoken.KindDot && toks[i-2].Kind == svtoken.KindIdent {
 			occ.Receiver = intern(toks[i-2].Text)
 		}
+		// Occurrence.Qualifier: "pkg::name" records "pkg" the same way.
+		if i >= 2 && toks[i-1].Kind == svtoken.KindColonColon && toks[i-2].Kind == svtoken.KindIdent {
+			occ.Qualifier = intern(toks[i-2].Text)
+		}
 		out = append(out, occ)
 	}
 	return out

@@ -2205,3 +2205,78 @@ func TestStructFieldLocationPointsAtTheFieldsOwnDeclaration(t *testing.T) {
 		t.Fatalf("a non-member must not resolve")
 	}
 }
+
+// pkgMemberFixture is one package member X plus every shape of same-named
+// token the package-member reference filter must either drop or keep.
+func pkgMemberFixture() *Index {
+	ix := NewIndex()
+	ix.SetFile("file:///pkg.sv", "package pa;\n  localparam int X = 1;\n  localparam int Y = X + 1;\nendpackage\n")
+	ix.SetFile("file:///other.sv", "package other;\n  localparam int X = 2;\nendpackage\n")
+	// shadow: module port X and bare uses; named connection; member select.
+	ix.SetFile("file:///shadow.sv", "module shadow #(parameter int X = 0) ();\n  localparam int Z = X;\nendmodule\n"+
+		"module inst;\n  shadow #(.X(3)) u ();\n  initial a.X = 1;\nendmodule\n")
+	// qualified uses of both packages, an importing module, and an
+	// unresolvable bare use.
+	ix.SetFile("file:///user.sv", "module user;\n  localparam int A = pa::X;\n  localparam int B = other::X;\nendmodule\n"+
+		"module imp;\n  import pa::*;\n  localparam int C = X;\nendmodule\n"+
+		"module bare;\n  localparam int D = X;\nendmodule\n")
+	return ix
+}
+
+func pkgMemberLines(locs []Location) map[string][]int {
+	out := map[string][]int{}
+	for _, l := range locs {
+		out[l.URI] = append(out[l.URI], l.Line)
+	}
+	return out
+}
+
+func TestScopedOccurrencesPackageMemberDropsProvablyUnrelated(t *testing.T) {
+	ix := pkgMemberFixture()
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))
+
+	if len(got["file:///other.sv"]) != 0 {
+		t.Errorf("other package's X must be dropped, got %v", got["file:///other.sv"])
+	}
+	// shadow.sv: port X (line 0), its bare use (line 1), connection (line 4)
+	// and member select (line 5) are all different symbols.
+	if len(got["file:///shadow.sv"]) != 0 {
+		t.Errorf("shadowed/connection/member-select X must be dropped, got %v", got["file:///shadow.sv"])
+	}
+	for _, l := range got["file:///user.sv"] {
+		if l == 2 {
+			t.Errorf("other::X must be dropped, got line %d", l)
+		}
+	}
+}
+
+func TestScopedOccurrencesPackageMemberKeepsPossibleReferences(t *testing.T) {
+	ix := pkgMemberFixture()
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))
+
+	if want := []int{1, 2}; len(got["file:///pkg.sv"]) != 2 || got["file:///pkg.sv"][0] != want[0] || got["file:///pkg.sv"][1] != want[1] {
+		t.Errorf("declaration and in-package use must be kept, got %v", got["file:///pkg.sv"])
+	}
+	kept := map[int]bool{}
+	for _, l := range got["file:///user.sv"] {
+		kept[l] = true
+	}
+	for _, line := range []int{1, 6, 9} { // pa::X, imported bare X, unresolvable bare X
+		if !kept[line] {
+			t.Errorf("user.sv line %d must be kept, got %v", line, got["file:///user.sv"])
+		}
+	}
+}
+
+func TestOccurrencesInFilePackageMemberDropsShadowed(t *testing.T) {
+	ix := pkgMemberFixture()
+	if locs := ix.OccurrencesInFile("file:///shadow.sv", 1, 22, "X", "", false); len(locs) != 3 {
+		// Cursor on the module's own port X resolves to the port, so this
+		// stays module-scoped: port decl, its use, and the .X( connection.
+		t.Errorf("expected module-scoped result, got %+v", locs)
+	}
+	locs := ix.OccurrencesInFile("file:///pkg.sv", 1, 17, "X", "", false)
+	if len(locs) != 2 {
+		t.Errorf("expected only the pkg.sv occurrences, got %+v", locs)
+	}
+}
