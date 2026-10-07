@@ -1522,8 +1522,15 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	}
 
 	var out []Location
+	conn := ix.connectionPositionsLocked(word, ref.uri)
 	for _, occ := range ix.occByName[word][ref.uri] {
 		if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+			continue
+		}
+		// A ".name(" connection token names the instantiated module's
+		// port/parameter, not this declaration; connectionOccurrencesLocked
+		// re-adds the ones that really target it.
+		if conn[[2]int{occ.Line, occ.Character}] {
 			continue
 		}
 		out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character})
@@ -1533,6 +1540,29 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	}
 	if d.Kind == KindArgument {
 		out = append(out, ix.namedArgOccurrencesLocked(ref.uri, container, word, "")...)
+	}
+	return dedupLocations(out)
+}
+
+// dedupLocations drops repeated {URI, Line, Character} entries, keeping the
+// first occurrence and the original order.
+func dedupLocations(locs []Location) []Location {
+	if len(locs) < 2 {
+		return locs
+	}
+	type key struct {
+		uri        string
+		line, char int
+	}
+	seen := make(map[key]bool, len(locs))
+	out := locs[:0]
+	for _, l := range locs {
+		k := key{l.URI, l.Line, l.Character}
+		if seen[k] {
+			continue
+		}
+		seen[k] = true
+		out = append(out, l)
 	}
 	return out
 }
@@ -1842,8 +1872,12 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 	for _, ref := range refs {
 		d := ix.byURI[ref.uri][ref.idx]
 		if container, restrict := ix.containerScopeLocked(ref.uri, d); restrict {
+			conn := ix.connectionPositionsLocked(name, ref.uri)
 			for _, occ := range ix.occByName[name][ref.uri] {
 				if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+					continue
+				}
+				if conn[[2]int{occ.Line, occ.Character}] {
 					continue
 				}
 				out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character, Kind: d.Kind})
@@ -1851,7 +1885,7 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 		}
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, name, d.Kind)...)
 	}
-	return out
+	return dedupLocations(out)
 }
 
 // CompleteSymbols returns the first limit distinct declared names starting

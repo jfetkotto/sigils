@@ -2359,3 +2359,27 @@ func TestPrototypeArgumentsNotIndexed(t *testing.T) {
 		}
 	}
 }
+
+func TestScopedOccurrencesLocalParamExcludesChildOverrideName(t *testing.T) {
+	ix := NewIndex()
+	const uri = "file:///top.sv"
+	ix.SetFile("file:///leaf.sv", "module leaf #(parameter P = 1)();\nendmodule\n")
+	ix.SetFile(uri, "module top;\n  localparam P = 2;\n  leaf #(.P(P)) u();\nendmodule\n")
+
+	locs := ix.ScopedOccurrences(uri, 1, 13, "P", "", false)
+
+	seen := map[[2]int]bool{}
+	for _, l := range locs {
+		k := [2]int{l.Line, l.Character}
+		if seen[k] {
+			t.Fatalf("duplicate location %+v in %+v", l, locs)
+		}
+		seen[k] = true
+		if l.Line == 2 && l.Character == 10 {
+			t.Fatalf("child's .P override name attributed to top's P: %+v", locs)
+		}
+	}
+	if !seen[[2]int{1, 13}] || !seen[[2]int{2, 12}] {
+		t.Fatalf("expected declaration and (P) use, got %+v", locs)
+	}
+}
