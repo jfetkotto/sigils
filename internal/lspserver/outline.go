@@ -32,13 +32,13 @@ func (s *Server) TextDocumentDocumentSymbol(context *glsp.Context, params *proto
 // keystroke to produce the same tree.
 func childIndex(decls []sv.Declaration) (children [][]int) {
 	children = make([][]int, len(decls))
-	for i, d := range decls {
+	for i := range decls {
 		// A Parent index out of range, or one that doesn't point strictly
 		// backwards, would mean a malformed bucket; ignoring it here keeps a
 		// bad index from panicking or building a cycle the recursion below
 		// would never escape.
-		if d.Parent >= 0 && d.Parent < len(decls) && d.Parent != i {
-			children[d.Parent] = append(children[d.Parent], i)
+		if p := decls[i].Parent; p >= 0 && p < len(decls) && p != i {
+			children[p] = append(children[p], i)
 		}
 	}
 	return children
@@ -47,8 +47,8 @@ func childIndex(decls []sv.Declaration) (children [][]int) {
 func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []protocol.DocumentSymbol {
 	var idxs []int
 	if parent == -1 {
-		for i, d := range decls {
-			if d.Parent == -1 {
+		for i := range decls {
+			if decls[i].Parent == -1 {
 				idxs = append(idxs, i)
 			}
 		}
@@ -58,7 +58,7 @@ func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []
 
 	out := make([]protocol.DocumentSymbol, 0, len(idxs))
 	for _, i := range idxs {
-		d := decls[i]
+		d := &decls[i]
 		out = append(out, protocol.DocumentSymbol{
 			Name:           d.Name,
 			Kind:           symbolKindFor(d.Kind),
@@ -80,7 +80,8 @@ func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []
 func (s *Server) TextDocumentFoldingRange(context *glsp.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
 	var ranges []protocol.FoldingRange
-	for _, d := range decls {
+	for i := range decls {
+		d := &decls[i]
 		if !sv.IsContainer(d.Kind) {
 			continue
 		}

@@ -307,7 +307,8 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		touched[fileURI] = true
 		ix.removeDeclarationsLocked(fileURI)
 		ix.byURI[fileURI] = decls
-		for i, d := range decls {
+		for i := range decls {
+			d := &decls[i]
 			ix.byName[d.Name] = append(ix.byName[d.Name], declRef{uri: fileURI, idx: i})
 		}
 	}
@@ -592,12 +593,14 @@ func (ix *Index) removeDeclarationsLocked(uri string) {
 	// and their bodies (or plain duplicates) can repeat one -- filter each
 	// name's global ref list once, not once per repeat.
 	seen := make(map[string]bool)
-	for _, d := range ix.byURI[uri] {
-		if seen[d.Name] {
+	decls := ix.byURI[uri]
+	for i := range decls {
+		name := decls[i].Name
+		if seen[name] {
 			continue
 		}
-		seen[d.Name] = true
-		refs := ix.byName[d.Name]
+		seen[name] = true
+		refs := ix.byName[name]
 		filtered := refs[:0]
 		for _, r := range refs {
 			if r.uri != uri {
@@ -605,9 +608,9 @@ func (ix *Index) removeDeclarationsLocked(uri string) {
 			}
 		}
 		if len(filtered) == 0 {
-			delete(ix.byName, d.Name)
+			delete(ix.byName, name)
 		} else {
-			ix.byName[d.Name] = filtered
+			ix.byName[name] = filtered
 		}
 	}
 	delete(ix.byURI, uri)
@@ -662,7 +665,7 @@ func (ix *Index) removeOccurrencesLocked(uri string) {
 }
 
 func (ix *Index) locationLocked(ref declRef) Location {
-	d := ix.byURI[ref.uri][ref.idx]
+	d := &ix.byURI[ref.uri][ref.idx]
 	return Location{URI: ref.uri, Line: d.Line, Character: d.Character, Kind: d.Kind, Prototype: d.Prototype}
 }
 
@@ -782,7 +785,7 @@ func (ix *Index) preferGloballyLocked(word string, refs []declRef, locs []Locati
 	kind := locs[0].Kind
 	var sameFile, sameContainer, anywhere []Location
 	for _, r := range ix.byName[word] {
-		d := ix.byURI[r.uri][r.idx]
+		d := &ix.byURI[r.uri][r.idx]
 		if d.Kind != kind || d.Prototype != wantPrototype {
 			continue
 		}
@@ -825,7 +828,7 @@ func (ix *Index) containerNameOfLocked(r declRef) string {
 
 // isContainerKind reports whether d is a module/interface/program, the
 // three kinds that carry a port and parameter list.
-func isContainerKind(d Declaration) bool {
+func isContainerKind(d *Declaration) bool {
 	return d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram
 }
 
@@ -853,18 +856,18 @@ func appendUniqueRefs(out []declRef, refs ...declRef) []declRef {
 // take one" accessor (Ports, Params, Typedef, structTypedefLocked), which
 // each used to stop at byName's first match and so answered differently
 // depending on the order files were indexed in. See primaryRefLocked.
-func (ix *Index) firstDeclLocked(name string, keep func(Declaration) bool) (declRef, Declaration, bool) {
+func (ix *Index) firstDeclLocked(name string, keep func(*Declaration) bool) (declRef, *Declaration, bool) {
 	var matches []declRef
 	for _, r := range ix.byName[name] {
-		if keep(ix.byURI[r.uri][r.idx]) {
+		if keep(&ix.byURI[r.uri][r.idx]) {
 			matches = append(matches, r)
 		}
 	}
 	if len(matches) == 0 {
-		return declRef{}, Declaration{}, false
+		return declRef{}, nil, false
 	}
 	ref := ix.primaryRefLocked(matches)
-	return ref, ix.byURI[ref.uri][ref.idx], true
+	return ref, &ix.byURI[ref.uri][ref.idx], true
 }
 
 // primaryRefLocked picks the one declaration a single-answer query should
@@ -879,9 +882,9 @@ func (ix *Index) firstDeclLocked(name string, keep func(Declaration) bool) (decl
 // reason -- see its topK comparator.
 func (ix *Index) primaryRefLocked(refs []declRef) declRef {
 	best := refs[0]
-	bestDecl := ix.byURI[best.uri][best.idx]
+	bestDecl := &ix.byURI[best.uri][best.idx]
 	for _, r := range refs[1:] {
-		d := ix.byURI[r.uri][r.idx]
+		d := &ix.byURI[r.uri][r.idx]
 		switch {
 		case r.uri != best.uri:
 			if r.uri > best.uri {
@@ -972,7 +975,7 @@ func (ix *Index) resolveRefsLocked(uri string, line, character int, word, qualif
 
 	var out []declRef
 	for _, r := range ix.byName[word] {
-		d := ix.byURI[r.uri][r.idx]
+		d := &ix.byURI[r.uri][r.idx]
 		if GloballyReferenceableKinds[d.Kind] {
 			out = append(out, r)
 		}
@@ -1155,7 +1158,10 @@ func (ix *Index) Ports(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
-	return d.Ports, ok
+	if !ok {
+		return nil, false
+	}
+	return d.Ports, true
 }
 
 // Params returns the overridable ("parameter", not "localparam") entries
@@ -1167,7 +1173,10 @@ func (ix *Index) Params(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
-	return d.Params, ok
+	if !ok {
+		return nil, false
+	}
+	return d.Params, true
 }
 
 // StructFieldLocation returns where field is declared inside the struct or
@@ -1215,7 +1224,7 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 // look up instead (see Declaration.Fields, which reuses Port's
 // name-and-detail shape and carries no position).
 func (ix *Index) structTypedefLocked(typeName string) (declRef, []Port, bool) {
-	ref, d, ok := ix.firstDeclLocked(typeName, func(d Declaration) bool {
+	ref, d, ok := ix.firstDeclLocked(typeName, func(d *Declaration) bool {
 		return d.Kind == KindTypedef && (d.TypedefKind == "struct" || d.TypedefKind == "union")
 	})
 	if !ok {
@@ -1345,8 +1354,11 @@ func (ix *Index) receiverTypeNameLocked(uri string, line, character int, receive
 func (ix *Index) Typedef(name string) (Declaration, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	_, d, ok := ix.firstDeclLocked(name, func(d Declaration) bool { return d.Kind == KindTypedef })
-	return d, ok
+	_, d, ok := ix.firstDeclLocked(name, func(d *Declaration) bool { return d.Kind == KindTypedef })
+	if !ok {
+		return Declaration{}, false
+	}
+	return *d, true
 }
 
 // Occurrences returns every identifier occurrence of name across the
@@ -1384,7 +1396,7 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 	}
 
 	ref := ix.primaryRefLocked(refs)
-	d := ix.byURI[ref.uri][ref.idx]
+	d := &ix.byURI[ref.uri][ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
 		if ix.filtersUnrelatedLocked(ref, d) {
@@ -1410,14 +1422,14 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 	return append(out, ix.namedArgOccurrencesInFileLocked(ref.uri, d, container, word, uri)...)
 }
 
-func (ix *Index) namedArgOccurrencesInFileLocked(subURI string, d, sub Declaration, word, uri string) []Location {
+func (ix *Index) namedArgOccurrencesInFileLocked(subURI string, d, sub *Declaration, word, uri string) []Location {
 	if d.Kind != KindArgument {
 		return nil
 	}
 	return ix.namedArgOccurrencesLocked(subURI, sub, word, uri)
 }
 
-func (ix *Index) connectionOccurrencesInFileLocked(containerURI string, d Declaration, word, uri string) []Location {
+func (ix *Index) connectionOccurrencesInFileLocked(containerURI string, d *Declaration, word, uri string) []Location {
 	if d.Kind != KindPort && d.Kind != KindParameter {
 		return nil
 	}
@@ -1517,7 +1529,7 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	}
 
 	ref := ix.primaryRefLocked(refs)
-	d := ix.byURI[ref.uri][ref.idx]
+	d := &ix.byURI[ref.uri][ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
 		if ix.filtersUnrelatedLocked(ref, d) {
@@ -1578,7 +1590,7 @@ func dedupLocations(locs []Location) []Location {
 // callee isn't resolved, so this over-approximates on purpose; dropping a
 // real call site would leave rename half done. Only uri is searched when
 // onlyURI is non-empty.
-func (ix *Index) namedArgOccurrencesLocked(subURI string, sub Declaration, name, onlyURI string) []Location {
+func (ix *Index) namedArgOccurrencesLocked(subURI string, sub *Declaration, name, onlyURI string) []Location {
 	bucket := ix.occByName[name]
 	uris := make([]string, 0, len(bucket))
 	for u := range bucket {
@@ -1609,7 +1621,7 @@ func (ix *Index) namedArgOccurrencesLocked(subURI string, sub Declaration, name,
 // declaration that is a package member or sits at file scope. Both can be
 // referenced from any file, so they can't be span-restricted, but both
 // obey the same drop rules.
-func (ix *Index) filtersUnrelatedLocked(ref declRef, d Declaration) bool {
+func (ix *Index) filtersUnrelatedLocked(ref declRef, d *Declaration) bool {
 	if GloballyReferenceableKinds[d.Kind] {
 		return false
 	}
@@ -1700,7 +1712,7 @@ type occurrenceFilter struct {
 }
 
 func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int) *occurrenceFilter {
-	d := ix.byURI[primary.uri][primary.idx]
+	d := &ix.byURI[primary.uri][primary.idx]
 	f := &occurrenceFilter{
 		ix:            ix,
 		name:          name,
@@ -1791,7 +1803,7 @@ func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
 	scope := -1
 	for _, i := range cands {
 		p := decls[i].Parent
-		if posWithin(decls[p], occ.Line, occ.Character) && (scope == -1 || narrower(decls[p], decls[scope])) {
+		if posWithin(&decls[p], occ.Line, occ.Character) && (scope == -1 || narrower(&decls[p], &decls[scope])) {
 			scope = p
 		}
 	}
@@ -1809,16 +1821,16 @@ func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
 // containerScopeLocked returns d's enclosing container and whether it's
 // safe to restrict an occurrence search to that container's span -- see
 // ScopedOccurrences for the reasoning.
-func (ix *Index) containerScopeLocked(uri string, d Declaration) (Declaration, bool) {
+func (ix *Index) containerScopeLocked(uri string, d *Declaration) (*Declaration, bool) {
 	if GloballyReferenceableKinds[d.Kind] || d.Parent == -1 {
-		return Declaration{}, false
+		return nil, false
 	}
-	parent := ix.byURI[uri][d.Parent]
+	parent := &ix.byURI[uri][d.Parent]
 	if d.Kind == KindArgument {
 		return parent, parent.Kind == KindFunction || parent.Kind == KindTask
 	}
 	if parent.Kind != KindModule && parent.Kind != KindInterface && parent.Kind != KindProgram {
-		return Declaration{}, false
+		return nil, false
 	}
 	return parent, true
 }
@@ -1888,7 +1900,7 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 
 	var out []Location
 	for _, ref := range refs {
-		d := ix.byURI[ref.uri][ref.idx]
+		d := &ix.byURI[ref.uri][ref.idx]
 		if container, restrict := ix.containerScopeLocked(ref.uri, d); restrict {
 			conn := ix.connectionPositionsLocked(name, ref.uri)
 			for _, occ := range ix.occByName[name][ref.uri] {
@@ -1934,7 +1946,7 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 			continue
 		}
 		ref := ix.primaryRefLocked(refs)
-		d := ix.byURI[ref.uri][ref.idx]
+		d := &ix.byURI[ref.uri][ref.idx]
 		top.push(Symbol{Name: name, Kind: d.Kind})
 	}
 	return top.sorted()
@@ -1955,8 +1967,9 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 // members of the same package scope, so both are found here.
 func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []declRef {
 	var out []declRef
-	for i, d := range ix.byURI[uri] {
-		if d.Parent == containerIdx && d.Name == name {
+	decls := ix.byURI[uri]
+	for i := range decls {
+		if d := &decls[i]; d.Parent == containerIdx && d.Name == name {
 			out = append(out, declRef{uri: uri, idx: i})
 		}
 	}
@@ -1964,7 +1977,9 @@ func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []de
 		if !ix.containerStillNamedLocked(uri, containerIdx, l.ContainerName) {
 			continue
 		}
-		for i, d := range ix.byURI[l.IncludedURI] {
+		included := ix.byURI[l.IncludedURI]
+		for i := range included {
+			d := &included[i]
 			// Only file scope: nesting *within* the included file is
 			// tracked normally, so a typedef inside a class inside the
 			// header is that class's child, not the container's.
@@ -2049,7 +2064,7 @@ func (ix *Index) containerImportRefsLocked(containerURI string, containerIdx int
 func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[qualifier] {
-		qd := ix.byURI[qref.uri][qref.idx]
+		qd := &ix.byURI[qref.uri][qref.idx]
 		switch qd.Kind {
 		case KindClass, KindPackage:
 			out = append(out, ix.childRefsLocked(qref.uri, qref.idx, name)...)
@@ -2090,7 +2105,7 @@ func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, b
 func (ix *Index) lookupInstantiationPortRefsLocked(moduleName, portName string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[moduleName] {
-		if !isContainerKind(ix.byURI[qref.uri][qref.idx]) {
+		if !isContainerKind(&ix.byURI[qref.uri][qref.idx]) {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, portName)...)
@@ -2255,7 +2270,9 @@ func (ix *Index) InterfaceMembers(interfaceName string) ([]Port, bool) {
 			continue
 		}
 		found = true
-		for _, m := range ix.byURI[qref.uri] {
+		decls := ix.byURI[qref.uri]
+		for i := range decls {
+			m := &decls[i]
 			if m.Parent != qref.idx {
 				continue
 			}
@@ -2276,8 +2293,9 @@ func (ix *Index) InterfaceMembers(interfaceName string) ([]Port, bool) {
 // *child* of some enclosing container -- it has no path to a match for a
 // declaration that has no enclosing container of its own at all.
 func (ix *Index) lookupSelfRefLocked(uri string, line, character int, word string) ([]declRef, bool) {
-	for i, d := range ix.byURI[uri] {
-		if d.Name == word && posWithin(d, line, character) {
+	decls := ix.byURI[uri]
+	for i := range decls {
+		if d := &decls[i]; d.Name == word && posWithin(d, line, character) {
 			return []declRef{{uri: uri, idx: i}}, true
 		}
 	}
@@ -2294,7 +2312,8 @@ func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name s
 	idx := innermostContaining(decls, line, character)
 	for idx != -1 {
 		var out []declRef
-		for i, d := range decls {
+		for i := range decls {
+			d := &decls[i]
 			if d.Parent == idx && d.Name == name {
 				out = append(out, declRef{uri: uri, idx: i})
 			}
@@ -2314,21 +2333,22 @@ func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name s
 // declaration whose span contains (line, character), or -1 if none does.
 func innermostContaining(decls []Declaration, line, character int) int {
 	best := -1
-	for i, d := range decls {
+	for i := range decls {
+		d := &decls[i]
 		if !containerKinds[d.Kind] {
 			continue
 		}
 		if !posWithin(d, line, character) {
 			continue
 		}
-		if best == -1 || narrower(d, decls[best]) {
+		if best == -1 || narrower(d, &decls[best]) {
 			best = i
 		}
 	}
 	return best
 }
 
-func posWithin(d Declaration, line, character int) bool {
+func posWithin(d *Declaration, line, character int) bool {
 	return posWithinBounds(line, character, d.Line, d.Character, d.EndLine, d.EndCharacter)
 }
 
@@ -2340,7 +2360,7 @@ func posWithinBounds(line, character, startLine, startChar, endLine, endChar int
 }
 
 // narrower reports whether a's span is nested within (no wider than) b's.
-func narrower(a, b Declaration) bool {
+func narrower(a, b *Declaration) bool {
 	return !before(a.Line, a.Character, b.Line, b.Character) &&
 		!before(b.EndLine, b.EndCharacter, a.EndLine, a.EndCharacter)
 }
@@ -2424,7 +2444,7 @@ func (ix *Index) WorkspaceSymbols(query string, limit int) (syms []SymbolLocatio
 			continue
 		}
 		for _, r := range refs {
-			d := ix.byURI[r.uri][r.idx]
+			d := &ix.byURI[r.uri][r.idx]
 			top.push(SymbolLocation{Name: name, Kind: d.Kind, URI: r.uri, Line: d.Line, Character: d.Character})
 		}
 	}
