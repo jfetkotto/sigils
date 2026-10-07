@@ -22,6 +22,12 @@ var filelistExtensions = map[string]bool{
 	".lst": true,
 }
 
+// maxFilelistLine is the longest filelist line expand will read. bufio's
+// default of 64 KiB is within reach of a generated filelist or a long
+// +define+ list, and a longer line stopped the scan there, silently
+// dropping everything after it but for a log warning.
+const maxFilelistLine = 1 << 20
+
 // FilelistDiscoverer resolves the recursive filelist-of-filelists
 // structure rooted at Config.Filelists. It is symlink-aware:
 // SourceFile.ResolvedPath always points at the real underlying file, even
@@ -153,6 +159,7 @@ func (d *FilelistDiscoverer) expand(ctx context.Context, path string, st *discov
 
 	dir := filepath.Dir(path)
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64<<10), maxFilelistLine)
 	for scanner.Scan() {
 		if ctx.Err() != nil {
 			return
