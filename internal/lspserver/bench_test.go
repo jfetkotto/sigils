@@ -336,3 +336,30 @@ func BenchmarkHoverInterfaceMember(b *testing.B) {
 		}
 	}
 }
+
+// Typing a declaration's name and then completing, on the large workspace:
+// each keystroke changes which names are declared, so any per-name upkeep
+// completion relies on is paid on every iteration.
+func BenchmarkTypeDeclarationThenComplete(b *testing.B) {
+	s, probe := benchWorkspaceN(b, 10*benchFiles)
+	base := benchModule(0)
+	pos := benchPos(b, base, "bus_t sig")
+	pos.Character = 7
+	completion := &protocol.CompletionParams{TextDocumentPositionParams: benchTextDocPos(probe, pos)}
+	b.ResetTimer()
+	for i := range b.N {
+		text := strings.Replace(base, "logic [7:0] node0;", fmt.Sprintf("logic [7:0] typed%d;", i%8), 1)
+		if err := s.TextDocumentDidChange(nil, &protocol.DidChangeTextDocumentParams{
+			TextDocument: protocol.VersionedTextDocumentIdentifier{
+				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri(probe)},
+				Version:                int32(i + 2),
+			},
+			ContentChanges: []any{protocol.TextDocumentContentChangeEventWhole{Text: text}},
+		}); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := s.TextDocumentCompletion(nil, completion); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
