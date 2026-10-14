@@ -7,6 +7,7 @@ package lspserver
 import (
 	"context"
 	"sync"
+	"time"
 
 	"github.com/tliron/commonlog"
 	"github.com/tliron/glsp"
@@ -23,7 +24,7 @@ import (
 // index that backs goto-definition, and the cancel func for the background
 // indexing/file-watching goroutine started at Initialize.
 type Server struct {
-	Log   commonlog.Logger
+	log   commonlog.Logger
 	docs  *document.Store
 	index *sv.Index
 
@@ -44,53 +45,46 @@ type Server struct {
 	// returns. nil until Initialize runs.
 	notify glsp.NotifyFunc
 
-	// published records, per URI, a digest of the diagnostics last sent to
-	// the client, so an unchanged list isn't sent again. See
-	// publishDiagnostics.
-	published map[string]string
+	// published records, per URI, the diagnostics last sent to the client,
+	// so an unchanged list isn't sent again. See diagnosticsChanged.
+	published map[string][]sv.Diagnostic
+
+	// tokMu guards tokens, the lexed form of each open document -- see
+	// tokensFor.
+	tokMu  sync.Mutex
+	tokens map[string]cachedTokens
+
+	// watchDebounce is set once by NewServer -- see defaultWatchDebounce.
+	watchDebounce time.Duration
+	// watchArmed, if set, is called each time watchFiles has registered all
+	// of its directories, so a test can wait for that instead of sleeping.
+	watchArmed func()
 }
 
+// NewServer returns a Server with an empty index, logging to log. Nothing
+// is indexed until Initialize runs.
 func NewServer(log commonlog.Logger) *Server {
 	return &Server{
-		Log:       log,
+		log:       log,
 		docs:      document.NewStore(),
 		index:     sv.NewIndex(),
-		published: make(map[string]string),
+		published: make(map[string][]sv.Diagnostic),
+		tokens:    make(map[string]cachedTokens),
+
+		watchDebounce: defaultWatchDebounce,
 	}
 }
 
-func (s *Server) Documents() *document.Store {
-	return s.docs
-}
-
-func (s *Server) Index() *sv.Index {
-	return s.index
-}
-
-func (s *Server) Root() string {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.root
-}
-
-func (s *Server) Config() workspace.Config {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.cfg
-}
-
-func (s *Server) Discoverer() workspace.Discoverer {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.discoverer
-}
-
+// ShutdownReceived reports whether a shutdown request has been handled,
+// which decides the process exit code after exit.
 func (s *Server) ShutdownReceived() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.shutdownReceived
 }
 
+// SnippetSupport reports whether the client said, at Initialize, that it
+// accepts snippet-format completion items.
 func (s *Server) SnippetSupport() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()

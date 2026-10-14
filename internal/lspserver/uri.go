@@ -6,6 +6,10 @@ import (
 	"strings"
 )
 
+// uriToPath converts a file:// URI to a filesystem path. Only POSIX-style
+// paths are handled: a Windows drive-letter URI ("file:///C:/x") comes back
+// as "/C:/x", and pathToURI doesn't convert separators either, so the
+// server isn't usable on Windows as it stands.
 func uriToPath(uri string) (string, error) {
 	u, err := url.Parse(uri)
 	if err != nil {
@@ -37,6 +41,12 @@ func pathToURI(path string) string {
 // in the file under a URI nothing can resolve back to a path, so
 // goto-definition offers both and rename emits a TextEdit into a document
 // the client may not even let the user write.
+//
+// It agrees with uriToPath on what counts: the scheme, compared
+// case-insensitively the way url.Parse normalizes it, is "file". This runs
+// for every URI that is opened, changed or published to, so it compares the
+// scheme directly rather than parsing the whole URI.
 func isFileURI(uri string) bool {
-	return strings.HasPrefix(uri, "file://")
+	scheme, _, ok := strings.Cut(uri, ":")
+	return ok && strings.EqualFold(scheme, "file")
 }

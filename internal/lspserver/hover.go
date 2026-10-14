@@ -23,7 +23,7 @@ import (
 // never find either on its own. A struct/union field access
 // ("receiver.field") is checked next, for the same reason -- see
 // structFieldHover.
-func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
+func (s *Server) TextDocumentHover(_ *glsp.Context, params *protocol.HoverParams) (*protocol.Hover, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil
@@ -35,7 +35,7 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 		return nil, nil
 	}
 
-	toks := sv.Lex(text) // lexed once, shared by both probes below -- see sv.Tokens
+	toks := s.tokensFor(params.TextDocument.URI, text) // shared by both probes below -- see sv.Tokens
 	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
 			return &protocol.Hover{
@@ -52,14 +52,11 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 	}
 
 	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
-		if hover, ok := s.structFieldHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
-			return hover, nil
-		}
-		if hover, ok := s.interfaceMemberHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
-			return hover, nil
-		}
-		if hover, ok := s.modportHover(params.TextDocument.URI, text, line, character, receiver, receiverStart, word); ok {
-			return hover, nil
+		recvQualifier, recvHasQualifier := sv.QualifierAt(text, line, receiverStart)
+		if recv, ok := s.index.HoverInfo(params.TextDocument.URI, line, character, receiver, recvQualifier, recvHasQualifier); ok {
+			if hover, ok := s.memberHover(&recv, word); ok {
+				return hover, nil
+			}
 		}
 	}
 
@@ -75,11 +72,25 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 	}, nil
 }
 
-// structFieldHover resolves receiver (the identifier immediately before a
-// "." that itself immediately precedes word, see sv.DotReceiverAt) to its
-// declared type and, if that type is a struct/union typedef with a field
-// named word, renders hover text for that field specifically. ok is false
-// whenever this doesn't apply (receiver doesn't resolve, isn't
+// memberHover renders hover text for "receiver.word", given receiver's own
+// resolved declaration: a struct/union field first, then an interface
+// member, then a modport. See memberLocation for why receiver is resolved
+// once by the caller.
+func (s *Server) memberHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if hover, ok := s.structFieldHover(recv, word); ok {
+		return hover, true
+	}
+	if hover, ok := s.interfaceMemberHover(recv, word); ok {
+		return hover, true
+	}
+	return s.modportHover(recv, word)
+}
+
+// structFieldHover takes receiver's resolved declaration (receiver being
+// the identifier immediately before a "." that itself immediately precedes
+// word, see sv.DotReceiverAt) and, if its declared type is a struct/union
+// typedef with a field named word, renders hover text for that field
+// specifically. ok is false whenever this doesn't apply (receiver isn't
 // struct/union-typed, or has no field named word) -- the caller then
 // falls back to HoverInfo's plain scope-chain lookup for word, same as
 // before this existed. That fallback matters: field-access reference
@@ -88,10 +99,8 @@ func (s *Server) TextDocumentHover(context *glsp.Context, params *protocol.Hover
 // silently land on an unrelated declaration that merely happens to share
 // the field's name (the same "coincidence" struct-member completion had
 // before sv.Index.StructFields, reused here).
-func (s *Server) structFieldHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) structFieldHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if recv.TypeName == "" {
 		return nil, false
 	}
 	fields, ok := s.index.StructFields(recv.TypeName)
@@ -116,10 +125,8 @@ func (s *Server) structFieldHover(uri, text string, line, character int, receive
 // already failed: recv.TypeName might name either a struct/union typedef or
 // an interface, and StructFields already reports "not found" cleanly for
 // the latter.
-func (s *Server) interfaceMemberHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) interfaceMemberHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if recv.TypeName == "" {
 		return nil, false
 	}
 	decl, ok := s.index.InterfaceMemberInfo(recv.TypeName, word)
@@ -135,10 +142,8 @@ func (s *Server) interfaceMemberHover(uri, text string, line, character int, rec
 // receiver's own interface, mirroring structFieldHover -- except gated on
 // recv.Kind == KindInterface rather than recv.TypeName != "", since an
 // interface name IS a type (it has none of its own to point at).
-func (s *Server) modportHover(uri, text string, line, character int, receiver string, receiverStart int, word string) (*protocol.Hover, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.Kind != sv.KindInterface {
+func (s *Server) modportHover(recv *sv.Declaration, word string) (*protocol.Hover, bool) {
+	if recv.Kind != sv.KindInterface {
 		return nil, false
 	}
 	decl, ok := s.index.ModportInfo(recv.Name, word)
@@ -183,15 +188,15 @@ func hoverText(d sv.Declaration) string {
 	b.WriteString("```systemverilog\n")
 	switch d.Kind {
 	case sv.KindModule, sv.KindInterface, sv.KindProgram:
-		fmt.Fprintf(&b, "%s %s%s", d.Kind, d.Name, portList(d.Ports))
+		fmt.Fprintf(&b, "%s %s%s", d.Kind, d.Name, portList(d.Ports()))
 	case sv.KindFunction, sv.KindTask:
 		if d.Prototype {
 			b.WriteString("extern ")
 		}
-		if d.ReturnType != "" {
-			fmt.Fprintf(&b, "%s %s %s(%s)", d.Kind, d.ReturnType, d.Name, argSummary(d.Args))
+		if d.ReturnType() != "" {
+			fmt.Fprintf(&b, "%s %s %s(%s)", d.Kind, d.ReturnType(), d.Name, argSummary(d.Args()))
 		} else {
-			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args))
+			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args()))
 		}
 	case sv.KindPort, sv.KindVariable, sv.KindArgument:
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
@@ -203,12 +208,12 @@ func hoverText(d sv.Declaration) string {
 		b.WriteString(typedefText(d))
 	case sv.KindEnumMember:
 		switch {
-		case d.Value != "" && d.EnumTypedef != "":
-			fmt.Fprintf(&b, "%s = %s  // %s", d.Name, d.Value, d.EnumTypedef)
-		case d.Value != "":
-			fmt.Fprintf(&b, "%s = %s", d.Name, d.Value)
-		case d.EnumTypedef != "":
-			fmt.Fprintf(&b, "enum member %s  // %s", d.Name, d.EnumTypedef)
+		case d.Value() != "" && d.EnumTypedef() != "":
+			fmt.Fprintf(&b, "%s = %s  // %s", d.Name, d.Value(), d.EnumTypedef())
+		case d.Value() != "":
+			fmt.Fprintf(&b, "%s = %s", d.Name, d.Value())
+		case d.EnumTypedef() != "":
+			fmt.Fprintf(&b, "enum member %s  // %s", d.Name, d.EnumTypedef())
 		default:
 			fmt.Fprintf(&b, "enum member %s", d.Name)
 		}
@@ -240,9 +245,9 @@ func parameterText(d sv.Declaration) string {
 		b.WriteString(" ")
 	}
 	b.WriteString(d.Name)
-	if d.Default != "" {
+	if d.Default() != "" {
 		b.WriteString(" = ")
-		b.WriteString(d.Default)
+		b.WriteString(d.Default())
 	}
 	return b.String()
 }
@@ -321,21 +326,21 @@ func structBody(fields []sv.Port) string {
 // declaration, e.g. "typedef class Foo;") falls back to the bare name,
 // same as any other Kind with nothing further to show.
 func typedefText(d sv.Declaration) string {
-	switch d.TypedefKind {
-	case "alias":
-		return fmt.Sprintf("typedef %s %s", d.AliasType, d.Name)
-	case "enum":
+	switch d.TypedefKind() {
+	case sv.TypedefAlias:
+		return fmt.Sprintf("typedef %s %s", d.AliasType(), d.Name)
+	case sv.TypedefEnum:
 		prefix := "enum"
-		if d.BaseType != "" {
-			prefix += " " + d.BaseType
+		if d.BaseType() != "" {
+			prefix += " " + d.BaseType()
 		}
-		return fmt.Sprintf("typedef %s %s %s", prefix, enumBody(d.EnumMembers), d.Name)
-	case "struct", "union":
-		prefix := d.TypedefKind
-		if d.Packed {
+		return fmt.Sprintf("typedef %s %s %s", prefix, enumBody(d.EnumMembers()), d.Name)
+	case sv.TypedefStruct, sv.TypedefUnion:
+		prefix := string(d.TypedefKind())
+		if d.Packed() {
 			prefix += " packed"
 		}
-		return fmt.Sprintf("typedef %s %s %s", prefix, structBody(d.Fields), d.Name)
+		return fmt.Sprintf("typedef %s %s %s", prefix, structBody(d.Fields()), d.Name)
 	default:
 		return fmt.Sprintf("typedef %s", d.Name)
 	}
@@ -358,7 +363,7 @@ func argSummary(args []sv.Port) string {
 // then additionally filters to this file, since a highlight is a
 // within-document visual aid even when the symbol itself is referenceable
 // workspace-wide (e.g. a module name).
-func (s *Server) TextDocumentDocumentHighlight(context *glsp.Context, params *protocol.DocumentHighlightParams) ([]protocol.DocumentHighlight, error) {
+func (s *Server) TextDocumentDocumentHighlight(_ *glsp.Context, params *protocol.DocumentHighlightParams) ([]protocol.DocumentHighlight, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil
@@ -369,9 +374,15 @@ func (s *Server) TextDocumentDocumentHighlight(context *glsp.Context, params *pr
 	if !ok {
 		return nil, nil
 	}
+	if sv.IsKeyword(word) {
+		// A keyword never resolves to a declaration and can't be a
+		// connection or field name, so there is nothing to highlight --
+		// answered before lexing, which is most of this request's cost.
+		return []protocol.DocumentHighlight{}, nil
+	}
 	qualifier, hasQualifier := sv.QualifierAt(text, line, start)
 
-	locs := s.fileOccurrences(sv.Lex(text), text, params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
+	locs := s.fileOccurrences(s.tokensFor(params.TextDocument.URI, text), text, params.TextDocument.URI, line, character, start, word, qualifier, hasQualifier)
 	out := make([]protocol.DocumentHighlight, 0, len(locs))
 	for _, loc := range locs {
 		out = append(out, protocol.DocumentHighlight{Range: loc.Range})

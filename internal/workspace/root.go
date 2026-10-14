@@ -1,3 +1,7 @@
+// Package workspace finds a sigils workspace and the source files in it:
+// FindRoot locates the root by its .sigils.json, LoadConfig reads that
+// file, and a Discoverer expands its filelists into the set of files to
+// index.
 package workspace
 
 import (
@@ -6,6 +10,8 @@ import (
 	"path/filepath"
 )
 
+// ErrRootNotFound is FindRoot's error when no directory at or above the
+// starting point holds ConfigFileName.
 var ErrRootNotFound = errors.New("workspace: no " + ConfigFileName + " found")
 
 // FindRoot locates the workspace root by walking upward from start looking

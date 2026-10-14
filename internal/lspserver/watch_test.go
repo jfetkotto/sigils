@@ -52,13 +52,20 @@ func (n *threadSafeNotifications) diagnosticsFor(uri string) (protocol.PublishDi
 }
 
 // runWatchFiles starts watchFiles in the background and returns a channel
-// that receives its result once it stops.
+// that receives its result once it stops. It returns only once the watcher
+// has registered every directory, so a write the test makes next is
+// guaranteed to produce an event.
 func runWatchFiles(s *Server, ctx context.Context, sourceFiles []workspace.SourceFile, filelistPaths []string) <-chan bool {
+	armed := make(chan struct{})
+	var once sync.Once
+	s.watchArmed = func() { once.Do(func() { close(armed) }) }
 	done := make(chan bool, 1)
 	go func() { done <- s.watchFiles(ctx, sourceFiles, filelistPaths) }()
-	// Give the watcher a moment to call fsnotify.Add and start selecting
-	// on its Events channel before the test writes to disk.
-	time.Sleep(150 * time.Millisecond)
+	select {
+	case <-armed:
+	case <-time.After(5 * time.Second):
+		panic("watchFiles did not finish registering its directories")
+	}
 	return done
 }
 
@@ -79,7 +86,7 @@ func TestWatchFilesReindexesChangedSourceFile(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("new_name"); ok {
+		if _, ok := s.index.Lookup("new_name"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -128,16 +135,13 @@ func TestWatchFilesSkipsReindexingOpenDocuments(t *testing.T) {
 	// Shorten the debounce so the 300ms settle below reaches past it --
 	// otherwise the assertion would pass trivially without ever exercising
 	// the open-document skip in syncFromDisk.
-	old := watchDebounce
-	watchDebounce = 50 * time.Millisecond
-	t.Cleanup(func() { watchDebounce = old })
-
 	dir := t.TempDir()
 	srcPath := filepath.Join(dir, "leaf.sv")
 	writeFileT(t, srcPath, "module old_name;\nendmodule\n")
 	resolved := evalSymT(t, srcPath)
 
 	s := newTestServer()
+	s.watchDebounce = 50 * time.Millisecond
 	uri := pathToURI(srcPath)
 	s.docs.Open(document.URI(uri), "systemverilog", 1, "module old_name;\nendmodule\n")
 	s.index.SetFile(uri, "module old_name;\nendmodule\n")
@@ -151,10 +155,10 @@ func TestWatchFilesSkipsReindexingOpenDocuments(t *testing.T) {
 	writeFileT(t, srcPath, "module new_name;\nendmodule\n")
 	time.Sleep(300 * time.Millisecond)
 
-	if _, ok := s.Index().Lookup("new_name"); ok {
+	if _, ok := s.index.Lookup("new_name"); ok {
 		t.Fatalf("expected the on-disk change to be ignored while the document is open")
 	}
-	if _, ok := s.Index().Lookup("old_name"); !ok {
+	if _, ok := s.index.Lookup("old_name"); !ok {
 		t.Fatalf("expected old_name to remain indexed (editor buffer stays authoritative)")
 	}
 
@@ -182,7 +186,7 @@ func TestWatchFilesCoalescesRapidWritesToFinalContent(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("name_v3"); ok {
+		if _, ok := s.index.Lookup("name_v3"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -190,7 +194,7 @@ func TestWatchFilesCoalescesRapidWritesToFinalContent(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, ok := s.Index().Lookup("name_v1"); ok {
+	if _, ok := s.index.Lookup("name_v1"); ok {
 		t.Fatalf("expected the original content to have been replaced")
 	}
 
@@ -233,7 +237,7 @@ func TestWatchFilesCascadesToDependentsOfAChangedInclude(t *testing.T) {
 	s.index.SetFile(pathToURI(defsPath), "`define ENABLE_FOO\n")
 	s.index.SetFile(pathToURI(topPath), "`include \"defs.svh\"\n`ifdef ENABLE_FOO\nmodule foo_only; endmodule\n`endif\n")
 
-	if _, ok := s.Index().Lookup("foo_only"); !ok {
+	if _, ok := s.index.Lookup("foo_only"); !ok {
 		t.Fatalf("expected foo_only to be declared with ENABLE_FOO defined")
 	}
 
@@ -253,7 +257,7 @@ func TestWatchFilesCascadesToDependentsOfAChangedInclude(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("foo_only"); !ok {
+		if _, ok := s.index.Lookup("foo_only"); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -283,7 +287,7 @@ func TestWatchFilesCascadePublishesDiagnosticsForDependent(t *testing.T) {
 	s.index.SetFile(pathToURI(defsPath), "`define VALID_MODE\n")
 	s.index.SetFile(pathToURI(topPath), topText)
 
-	if diags := s.Index().Diagnostics(pathToURI(topPath)); len(diags) != 0 {
+	if diags := s.index.Diagnostics(pathToURI(topPath)); len(diags) != 0 {
 		t.Fatalf("expected top.sv to start with no diagnostics, got %+v", diags)
 	}
 
@@ -332,7 +336,7 @@ func TestWatchFilesCascadeReindexesOpenDependent(t *testing.T) {
 	s.index.SetFile(pathToURI(topPath), topText)
 	s.docs.Open(document.URI(pathToURI(topPath)), "systemverilog", 1, topText)
 
-	if _, ok := s.Index().Lookup("foo_only"); !ok {
+	if _, ok := s.index.Lookup("foo_only"); !ok {
 		t.Fatalf("expected foo_only to be declared with ENABLE_FOO defined")
 	}
 
@@ -351,7 +355,7 @@ func TestWatchFilesCascadeReindexesOpenDependent(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("foo_only"); !ok {
+		if _, ok := s.index.Lookup("foo_only"); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -413,7 +417,7 @@ func TestWatchFilesDropsARemovedSourceFile(t *testing.T) {
 
 	s := newTestServer()
 	s.index.SetFile(pathToURI(srcPath), "module doomed;\nendmodule\n")
-	if _, ok := s.Index().Lookup("doomed"); !ok {
+	if _, ok := s.index.Lookup("doomed"); !ok {
 		t.Fatalf("expected doomed to be indexed to begin with")
 	}
 
@@ -427,7 +431,7 @@ func TestWatchFilesDropsARemovedSourceFile(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("doomed"); !ok {
+		if _, ok := s.index.Lookup("doomed"); !ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -466,7 +470,7 @@ func TestWatchFilesTreatsRenameBasedSaveAsAChangeNotARemoval(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("new_name"); ok {
+		if _, ok := s.index.Lookup("new_name"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -474,10 +478,39 @@ func TestWatchFilesTreatsRenameBasedSaveAsAChangeNotARemoval(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	if _, ok := s.Index().Lookup("old_name"); ok {
+	if _, ok := s.index.Lookup("old_name"); ok {
 		t.Fatalf("old_name should have been replaced, not kept alongside")
 	}
 
 	cancel()
 	waitForWatch(t, done)
+}
+
+// A cascade runs inside the watcher's event loop and can cover thousands of
+// files, so a cancelled context (Shutdown) has to stop it rather than let
+// it run to the end.
+func TestCascadeReindexDependentsStopsWhenCancelled(t *testing.T) {
+	dir := t.TempDir()
+	hdr := filepath.Join(dir, "hdr.svh")
+	dep := filepath.Join(dir, "top.sv")
+	writeFileT(t, hdr, "typedef logic [7:0] byte_t;\n")
+	writeFileT(t, dep, "`include \"hdr.svh\"\nmodule old_name;\nendmodule\n")
+
+	s := newTestServer()
+	s.index.SetIncludeResolverFactory(newIncludeResolverFactory(nil))
+	s.index.SetFile(pathToURI(dep), "`include \"hdr.svh\"\nmodule old_name;\nendmodule\n")
+	writeFileT(t, dep, "`include \"hdr.svh\"\nmodule new_name;\nendmodule\n")
+	changed := []string{pathToURI(hdr)}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	s.cascadeReindexDependents(ctx, changed)
+	if _, ok := s.index.Lookup("new_name"); ok {
+		t.Fatalf("a cancelled cascade still rescanned the dependent")
+	}
+
+	s.cascadeReindexDependents(context.Background(), changed)
+	if _, ok := s.index.Lookup("new_name"); !ok {
+		t.Fatalf("the cascade did not rescan the header's dependent")
+	}
 }

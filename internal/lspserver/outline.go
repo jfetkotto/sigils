@@ -10,7 +10,7 @@ import (
 // TextDocumentDocumentSymbol builds an outline tree for the file straight
 // from the declaration tree sv.Index already maintains (Parent indices and
 // all), with no extra scanning.
-func (s *Server) TextDocumentDocumentSymbol(context *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
+func (s *Server) TextDocumentDocumentSymbol(_ *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
 	tree := documentSymbolTree(decls, childIndex(decls), -1)
 	if len(tree) == 0 {
@@ -21,8 +21,8 @@ func (s *Server) TextDocumentDocumentSymbol(context *glsp.Context, params *proto
 
 // childIndex buckets decls by Parent once, so documentSymbolTree can find a
 // declaration's children by lookup instead of rescanning the whole slice.
-// children[i] holds the indices parented to i; roots (Parent == -1) come
-// back separately, since there's no bucket to hold them.
+// children[i] holds the indices parented to i; roots (Parent == -1) have
+// no bucket, so documentSymbolTree finds those by scanning for them.
 //
 // Without this the tree build is quadratic: it rescanned every declaration
 // in the file once per declaration, including the ports, variables and
@@ -32,13 +32,13 @@ func (s *Server) TextDocumentDocumentSymbol(context *glsp.Context, params *proto
 // keystroke to produce the same tree.
 func childIndex(decls []sv.Declaration) (children [][]int) {
 	children = make([][]int, len(decls))
-	for i, d := range decls {
+	for i := range decls {
 		// A Parent index out of range, or one that doesn't point strictly
 		// backwards, would mean a malformed bucket; ignoring it here keeps a
 		// bad index from panicking or building a cycle the recursion below
 		// would never escape.
-		if d.Parent >= 0 && d.Parent < len(decls) && d.Parent != i {
-			children[d.Parent] = append(children[d.Parent], i)
+		if p := decls[i].Parent; p >= 0 && p < len(decls) && p != i {
+			children[p] = append(children[p], i)
 		}
 	}
 	return children
@@ -47,8 +47,8 @@ func childIndex(decls []sv.Declaration) (children [][]int) {
 func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []protocol.DocumentSymbol {
 	var idxs []int
 	if parent == -1 {
-		for i, d := range decls {
-			if d.Parent == -1 {
+		for i := range decls {
+			if decls[i].Parent == -1 {
 				idxs = append(idxs, i)
 			}
 		}
@@ -58,7 +58,7 @@ func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []
 
 	out := make([]protocol.DocumentSymbol, 0, len(idxs))
 	for _, i := range idxs {
-		d := decls[i]
+		d := &decls[i]
 		out = append(out, protocol.DocumentSymbol{
 			Name:           d.Name,
 			Kind:           symbolKindFor(d.Kind),
@@ -77,10 +77,11 @@ func documentSymbolTree(decls []sv.Declaration, children [][]int, parent int) []
 // (module/interface/program/class/package/function/task) in the file --
 // their Start/End spans are exactly what sv.Index already tracks to
 // support the scope chain, reused here as-is.
-func (s *Server) TextDocumentFoldingRange(context *glsp.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
+func (s *Server) TextDocumentFoldingRange(_ *glsp.Context, params *protocol.FoldingRangeParams) ([]protocol.FoldingRange, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
 	var ranges []protocol.FoldingRange
-	for _, d := range decls {
+	for i := range decls {
+		d := &decls[i]
 		if !sv.IsContainer(d.Kind) {
 			continue
 		}
@@ -110,7 +111,7 @@ const maxWorkspaceSymbols = 500
 // workspace/symbol response has no "incomplete" flag to set (it's a bare
 // SymbolInformation array), so narrowing the query is the only way to reach
 // what was cut.
-func (s *Server) WorkspaceSymbol(context *glsp.Context, params *protocol.WorkspaceSymbolParams) ([]protocol.SymbolInformation, error) {
+func (s *Server) WorkspaceSymbol(_ *glsp.Context, params *protocol.WorkspaceSymbolParams) ([]protocol.SymbolInformation, error) {
 	results, _ := s.index.WorkspaceSymbols(params.Query, maxWorkspaceSymbols)
 	out := make([]protocol.SymbolInformation, 0, len(results))
 	for _, r := range results {

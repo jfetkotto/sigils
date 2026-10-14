@@ -18,8 +18,8 @@ func TestIndexLookup(t *testing.T) {
 	if locs[0].URI != "file:///a.sv" || locs[0].Line != 0 || locs[0].Character != 7 {
 		t.Fatalf("unexpected location: %+v", locs[0])
 	}
-	if ix.FileCount() != 1 {
-		t.Fatalf("FileCount() = %d, want 1", ix.FileCount())
+	if len(ix.files) != 1 {
+		t.Fatalf("indexed %d files, want 1", len(ix.files))
 	}
 }
 
@@ -62,8 +62,8 @@ func TestIndexRemoveFile(t *testing.T) {
 	if _, ok := ix.Lookup("top"); ok {
 		t.Fatalf("expected top to be gone after RemoveFile")
 	}
-	if ix.FileCount() != 0 {
-		t.Fatalf("FileCount() = %d, want 0", ix.FileCount())
+	if len(ix.files) != 0 {
+		t.Fatalf("indexed %d files, want 0", len(ix.files))
 	}
 }
 
@@ -112,7 +112,7 @@ func TestFindInstantiationPortAlsoResolvesParameterOverrides(t *testing.T) {
 	}
 
 	decl, ok := ix.InstantiationPortInfo("leaf", "WIDTH")
-	if !ok || decl.Kind != KindParameter || decl.Detail != "int" || decl.Default != "8" {
+	if !ok || decl.Kind != KindParameter || decl.Detail != "int" || decl.Default() != "8" {
 		t.Fatalf("InstantiationPortInfo(leaf, WIDTH) = %+v, %v", decl, ok)
 	}
 }
@@ -632,7 +632,7 @@ func TestIndexTypedefReturnsFullDeclaration(t *testing.T) {
 	ix.SetFile("file:///a.sv", "typedef struct packed { logic [7:0] a; } bus_t;\n")
 
 	d, ok := ix.Typedef("bus_t")
-	if !ok || d.Kind != KindTypedef || d.TypedefKind != "struct" || len(d.Fields) != 1 {
+	if !ok || d.Kind != KindTypedef || d.TypedefKind() != "struct" || len(d.Fields()) != 1 {
 		t.Fatalf("Typedef(bus_t) = %+v, %v", d, ok)
 	}
 }
@@ -838,7 +838,7 @@ func TestHoverInfoResolvesScopeChain(t *testing.T) {
 	ix.SetFile("file:///top.sv", "module top;\n  leaf u_leaf();\nendmodule\n")
 
 	d, ok := ix.HoverInfo("file:///top.sv", 1, 3, "leaf", "", false)
-	if !ok || d.Kind != KindModule || len(d.Ports) != 1 || d.Ports[0].Name != "clk" {
+	if !ok || d.Kind != KindModule || len(d.Ports()) != 1 || d.Ports()[0].Name != "clk" {
 		t.Fatalf("HoverInfo(leaf) = %+v, %v", d, ok)
 	}
 }
@@ -868,7 +868,7 @@ func TestHoverInfoResolvesFileScopeDeclarationWithNoEnclosingContainer(t *testin
 
 func TestFindDefinitionResolvesTypedefFromIncludedFile(t *testing.T) {
 	// The scope-chain walk is bucket-local and typedef isn't in
-	// GloballyReferenceableKinds, so without the explicit "search this
+	// IsGloballyReferenceable, so without the explicit "search this
 	// file's own `include d files" step, a typedef pulled in via
 	// `include would never resolve from the includer at all -- the
 	// entire point of attributing it to its own file in the first place.
@@ -1370,30 +1370,23 @@ func TestRemoveFileClearsItsDependencies(t *testing.T) {
 	}
 }
 
-func TestAllKnownURIsIncludesEveryScannedFile(t *testing.T) {
+func TestIndexHoldsEveryScannedFile(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module a; endmodule")
 	ix.SetFile("file:///b.sv", "module b; endmodule")
 
-	known := ix.AllKnownURIs()
-	want := map[string]bool{"file:///a.sv": true, "file:///b.sv": true}
-	if len(known) != len(want) {
-		t.Fatalf("AllKnownURIs() = %v, want %v", known, want)
-	}
-	for _, uri := range known {
-		if !want[uri] {
-			t.Fatalf("unexpected URI %s in AllKnownURIs()", uri)
-		}
+	if got, want := sortedKeys(ix.files), []string{"file:///a.sv", "file:///b.sv"}; !slices.Equal(got, want) {
+		t.Fatalf("indexed %v, want %v", got, want)
 	}
 }
 
-func TestAllKnownURIsShrinksAfterRemoveFile(t *testing.T) {
+func TestIndexForgetsARemovedFile(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module a; endmodule")
 	ix.RemoveFile("file:///a.sv")
 
-	if known := ix.AllKnownURIs(); len(known) != 0 {
-		t.Fatalf("AllKnownURIs() = %v, want none", known)
+	if len(ix.files) != 0 {
+		t.Fatalf("still indexed after RemoveFile: %v", sortedKeys(ix.files))
 	}
 }
 
@@ -1536,8 +1529,8 @@ func TestHoverInfoResolvesQualifiedPackageMemberFromIncludedFile(t *testing.T) {
 	if !ok || d.Kind != KindTypedef || d.Name != "t_header_cfg" {
 		t.Fatalf("HoverInfo(pkg_cfg::t_header_cfg) = %+v, %v", d, ok)
 	}
-	if d.TypedefKind != "struct" {
-		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind)
+	if d.TypedefKind() != "struct" {
+		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind())
 	}
 
 	// The inline sibling, which never lost its Parent link, must still
@@ -1961,6 +1954,26 @@ func BenchmarkWorkspaceSymbolsEmptyQuery(b *testing.B) {
 	}
 }
 
+// A short prefix that every one of 50k names matches: completion's worst
+// case, and the one an editor hits on the first character typed.
+func BenchmarkCompleteSymbolsWidePrefix(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.CompleteSymbols("mod_", 200)
+	}
+}
+
+// A prefix only a handful of 50k names match, so the cost is finding them
+// rather than ranking them.
+func BenchmarkCompleteSymbolsNarrowPrefix(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.CompleteSymbols("mod_4999", 200)
+	}
+}
+
 // The reported collision: a struct field whose name is also an unrelated
 // module's port. Before ScopedOccurrencesForStructField the field query
 // resolved to nothing and fell back to the unscoped, name-wide list, so
@@ -2053,6 +2066,34 @@ func TestSetFileRetractsAnIncludeThatIsNoLongerThere(t *testing.T) {
 	}
 }
 
+// A named connection inside a dropped header must stop counting as a
+// reference to the port it connects, or renaming the port writes an edit
+// into a file the build no longer reads.
+func TestSetFileRetractsConnectionSitesOfADroppedInclude(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"inst.svh": "leaf u0 (.clk(c));\n"}}
+	})
+	ix.SetFile("file:///leaf.sv", "module leaf(input logic clk);\nendmodule\n")
+	ix.SetFile("file:///top.sv", "module top;\n`include \"inst.svh\"\nendmodule\n")
+
+	inHeader := func() bool {
+		return slices.ContainsFunc(ix.ScopedOccurrencesForInstantiationConnection("leaf", "clk"), func(l Location) bool {
+			return l.URI == "file:///inst.svh"
+		})
+	}
+	if !inHeader() {
+		t.Fatalf("expected the header's connection site while the include is present")
+	}
+
+	ix.SetFile("file:///top.sv", "module top;\nendmodule\n")
+
+	if inHeader() {
+		t.Fatalf("the dropped header's connection site still counts as a reference: %+v",
+			ix.ScopedOccurrencesForInstantiationConnection("leaf", "clk"))
+	}
+}
+
 // A header two files include must survive one of them dropping it.
 func TestSetFileKeepsAnIncludeAnotherFileStillHas(t *testing.T) {
 	ix := NewIndex()
@@ -2112,7 +2153,7 @@ func TestHoverInfoPicksTheSameDeclarationRegardlessOfIndexOrder(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatalf("expected cfg_t to resolve in both orders (%v, %v)", ok1, ok2)
 	}
-	if got1.Line != got2.Line || got1.AliasType != got2.AliasType {
+	if got1.Line != got2.Line || got1.AliasType() != got2.AliasType() {
 		t.Fatalf("index order changed the answer: %+v vs %+v", got1, got2)
 	}
 }
@@ -2461,7 +2502,95 @@ func TestOccurrenceRecordsUnitQualifier(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module m;\n  $unit::T y;\nendmodule\n")
 	occs := ix.occByName["T"]["file:///a.sv"]
-	if len(occs) != 1 || occs[0].Qualifier != "$unit" {
+	if len(occs) != 1 || occs[0].qualifier() != "$unit" {
 		t.Fatalf("expected one T occurrence qualified by $unit, got %+v", occs)
+	}
+}
+
+// The index stores an occurrence's receiver, qualifier and named-argument
+// flag in one field (see occurrence), which is only lossless while the
+// scanner never sets more than one of them on the same token.
+func TestStoredOccurrenceKeepsReceiverQualifierAndNamedArg(t *testing.T) {
+	src := "module top;\n" +
+		"  assign x = st.field + a . b + pkg::member + $unit::T;\n" +
+		"  leaf u0 (.clk(clk), .rst(r));\n" +
+		"  initial f(.arg(1), .other(2));\n" +
+		"endmodule\n"
+	occs := occurrencesFromSVParseTokens(Lex(src))
+	if len(occs) == 0 {
+		t.Fatal("no occurrences scanned")
+	}
+	var receivers, qualifiers, namedArgs int
+	for _, o := range occs {
+		if o.Receiver != "" {
+			receivers++
+		}
+		if o.Qualifier != "" {
+			qualifiers++
+		}
+		if o.NamedArg {
+			namedArgs++
+		}
+		set := 0
+		for _, b := range []bool{o.Receiver != "", o.Qualifier != "", o.NamedArg} {
+			if b {
+				set++
+			}
+		}
+		if set > 1 {
+			t.Fatalf("%+v sets more than one of Receiver, Qualifier and NamedArg", o)
+		}
+		s := o.stored()
+		if s.receiver() != o.Receiver || s.qualifier() != o.Qualifier || s.namedArg() != o.NamedArg ||
+			int(s.line) != o.Line || int(s.character) != o.Character {
+			t.Fatalf("stored form %+v lost information from %+v", s, o)
+		}
+	}
+	if receivers == 0 || qualifiers == 0 || namedArgs == 0 {
+		t.Fatalf("source doesn't exercise every kind: %d receivers, %d qualifiers, %d named args", receivers, qualifiers, namedArgs)
+	}
+}
+
+// Rescanning a file drops exactly its own entries from each name's global
+// list, in order, whether they sit at the tail (the file was indexed last)
+// or between other files' entries.
+func TestSetFileReplacesOnlyItsOwnByNameEntries(t *testing.T) {
+	ix := NewIndex()
+	twoX := "module a(input logic x);\n  logic x;\nendmodule\n"
+	oneX := func(m string) string { return "module " + m + ";\n  logic x;\nendmodule\n" }
+	uris := func() []string {
+		locs, _ := ix.Lookup("x")
+		var out []string
+		for _, l := range locs {
+			out = append(out, l.URI)
+		}
+		return out
+	}
+
+	ix.SetFile("file:///a.sv", twoX)
+	ix.SetFile("file:///b.sv", oneX("b"))
+	ix.SetFile("file:///c.sv", oneX("c"))
+	want := []string{"file:///a.sv", "file:///a.sv", "file:///b.sv", "file:///c.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after indexing: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///a.sv", twoX) // entries ahead of other files': filtered
+	want = []string{"file:///b.sv", "file:///c.sv", "file:///a.sv", "file:///a.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after rescanning a.sv: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///a.sv", oneX("a")) // entries at the tail: popped
+	want = []string{"file:///b.sv", "file:///c.sv", "file:///a.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after rescanning a.sv again: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///b.sv", "module b;\nendmodule\n")
+	ix.RemoveFile("file:///c.sv")
+	ix.RemoveFile("file:///a.sv")
+	if got := uris(); got != nil {
+		t.Fatalf("x still declared in %v after every declaration was removed", got)
 	}
 }

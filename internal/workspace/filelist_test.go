@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -432,5 +433,43 @@ func TestFilelistDiscovererWarnsOnMissingFilelist(t *testing.T) {
 	}
 	if len(warnings) == 0 {
 		t.Fatalf("expected a warning about the missing filelist")
+	}
+}
+
+// Shutdown and a re-Initialize cancel the walk; a cancelled one must stop
+// and say so rather than keep expanding filelists nobody will use.
+func TestFilelistDiscovererStopsWhenCancelled(t *testing.T) {
+	root := t.TempDir()
+	writeFile(t, filepath.Join(root, "top.f"), "a.sv\n")
+	writeFile(t, filepath.Join(root, "a.sv"), "module a; endmodule\n")
+	d := NewFilelistDiscoverer(Root{Path: root}, Config{Filelists: []string{"top.f"}}, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if files, err := d.Files(ctx, Root{Path: root}); err != context.Canceled || files != nil {
+		t.Fatalf("Files on a cancelled context = %v, %v; want nil, context.Canceled", files, err)
+	}
+	if got := d.VisitedFilelists(); len(got) != 0 {
+		t.Fatalf("a cancelled walk replaced the visited filelists: %v", got)
+	}
+
+	files, err := d.Files(context.Background(), Root{Path: root})
+	if err != nil || len(files) != 1 {
+		t.Fatalf("Files = %v, %v; want a.sv", files, err)
+	}
+}
+
+// A line past bufio's default 64 KiB token limit used to end the scan,
+// dropping every entry after it.
+func TestFilelistDiscovererReadsPastAVeryLongLine(t *testing.T) {
+	root := t.TempDir()
+	long := "+define+" + strings.Repeat("X", 200<<10)
+	writeFile(t, filepath.Join(root, "top.f"), long+"\na.sv\n")
+	writeFile(t, filepath.Join(root, "a.sv"), "module a; endmodule\n")
+	d := NewFilelistDiscoverer(Root{Path: root}, Config{Filelists: []string{"top.f"}}, func(msg string) { t.Errorf("unexpected warning: %.80s", msg) })
+
+	files, err := d.Files(context.Background(), Root{Path: root})
+	if err != nil || len(files) != 1 {
+		t.Fatalf("Files = %v, %v; want a.sv", files, err)
 	}
 }

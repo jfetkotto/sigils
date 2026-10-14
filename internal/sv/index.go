@@ -1,10 +1,11 @@
 package sv
 
 import (
+	"cmp"
 	"slices"
-	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/jfetkotto/svparse/lexer"
 )
@@ -65,7 +66,60 @@ type Occurrence struct {
 	Character int
 }
 
-// declRef points at one Declaration within Index.byURI, letting the index
+// occurrence is how the index stores an Occurrence: occByName is keyed by
+// the name, so the name itself isn't repeated, and Receiver, Qualifier and
+// NamedArg share one field, since the token before an identifier is a "."
+// after an identifier, a "::", or a "." after "(" or "," -- never more than
+// one of them. That takes one occurrence from 72 bytes to 32, and the index
+// holds one for every identifier token in the workspace.
+type occurrence struct {
+	prefix          string // the receiver or qualifier, per kind
+	line, character int32
+	kind            occurrenceKind
+}
+
+type occurrenceKind uint8
+
+const (
+	occPlain occurrenceKind = iota
+	occReceiver
+	occQualifier
+	occNamedArg
+)
+
+func (o Occurrence) stored() occurrence {
+	s := occurrence{line: int32(o.Line), character: int32(o.Character)}
+	switch {
+	case o.Receiver != "":
+		s.kind, s.prefix = occReceiver, o.Receiver
+	case o.Qualifier != "":
+		s.kind, s.prefix = occQualifier, o.Qualifier
+	case o.NamedArg:
+		s.kind = occNamedArg
+	}
+	return s
+}
+
+// receiver is Occurrence.Receiver.
+func (o occurrence) receiver() string {
+	if o.kind == occReceiver {
+		return o.prefix
+	}
+	return ""
+}
+
+// qualifier is Occurrence.Qualifier.
+func (o occurrence) qualifier() string {
+	if o.kind == occQualifier {
+		return o.prefix
+	}
+	return ""
+}
+
+// namedArg is Occurrence.NamedArg.
+func (o occurrence) namedArg() bool { return o.kind == occNamedArg }
+
+// declRef points at one Declaration within Index.files, letting the index
 // cross-reference a name to its full Declaration (including Parent, for
 // walking the scope chain) without duplicating it.
 type declRef struct {
@@ -112,11 +166,18 @@ type ownedLink struct {
 // removing one file's "clk" occurrences means rewriting a slice holding
 // every "clk" in the workspace -- per edit, per hot name.
 type Index struct {
-	mu     sync.RWMutex
-	byURI  map[string][]Declaration
+	mu sync.RWMutex
+	// files[uri] holds uri's declarations, along with the per-file lookups
+	// resolution uses (see fileDecls).
+	files  map[string]*fileDecls
 	byName map[string][]declRef
+	// names is byName's keys in sorted order, or nil until a query needs
+	// it; nameChanges holds the keys one mutation added (+1) or removed
+	// (-1) until syncNamesLocked applies them. See sortedNamesLocked.
+	names       atomic.Pointer[[]string]
+	nameChanges map[string]int
 	// occByName[name][uri] holds every occurrence of name in uri.
-	occByName map[string]map[string][]Occurrence
+	occByName map[string]map[string][]occurrence
 	// occNamesByURI[uri] lists the distinct identifier names occurring in
 	// uri, so removeLocked can clear a file's buckets in O(distinct names).
 	occNamesByURI map[string][]string
@@ -144,25 +205,21 @@ type Index struct {
 	errByURI map[string][]Diagnostic
 
 	// importsByURI[uri] holds every import statement in uri, attributed
-	// and Parent-scoped exactly like byURI's declarations (see Scan) --
+	// and Parent-scoped exactly like files' declarations (see Scan) --
 	// consulted only by lookupInImportsRefsLocked, never by name lookup,
 	// completion, or hover directly (an import doesn't declare a name of
 	// its own -- see importDecl's doc comment).
 	importsByURI map[string][]importDecl
 
-	// connectionsByURI[uri] holds every named port connection/parameter
-	// override in uri (see connectionSite's doc comment) -- consulted only
-	// by connectionOccurrencesLocked, for find-references/rename scoping
-	// on a connection site; never by name lookup, completion, or hover
-	// directly (a connection doesn't declare a name of its own either).
-	connectionsByURI map[string][]connectionSite
-
-	// connByName[name][uri] holds every connection site named name in uri,
-	// and connNamesByURI[uri] the distinct names uri contributes -- the
-	// same two-map shape occByName/occNamesByURI use, for the same reason.
+	// connByName[name][uri] holds every named port connection or parameter
+	// override (see connectionSite) named name in uri, and
+	// connNamesByURI[uri] the distinct names uri contributes -- the same
+	// two-map shape occByName/occNamesByURI use, for the same reason. They
+	// are consulted only for find-references/rename scoping, never by name
+	// lookup, completion or hover (a connection doesn't declare a name).
 	//
-	// connectionOccurrencesLocked used to iterate connectionsByURI in full,
-	// i.e. every named connection in the workspace, and it runs from
+	// connectionOccurrencesLocked used to iterate every named connection in
+	// the workspace, and it runs from
 	// ScopedOccurrences whenever the resolved declaration is a port or
 	// parameter -- so on essentially every documentHighlight inside a
 	// module body. A design with 5,000 instantiations averaging 20 named
@@ -213,19 +270,20 @@ type Index struct {
 	initialMacros map[string]string
 }
 
+// NewIndex returns an empty Index.
 func NewIndex() *Index {
 	return &Index{
-		byURI:            make(map[string][]Declaration),
-		byName:           make(map[string][]declRef),
-		occByName:        make(map[string]map[string][]Occurrence),
-		occNamesByURI:    make(map[string][]string),
-		dependsOn:        make(map[string][]string),
-		dependedOnBy:     make(map[string]map[string]bool),
-		errByURI:         make(map[string][]Diagnostic),
-		importsByURI:     make(map[string][]importDecl),
-		connectionsByURI: make(map[string][]connectionSite),
-		connByName:       make(map[string]map[string][]connectionSite),
-		connNamesByURI:   make(map[string][]string),
+		byName:         make(map[string][]declRef),
+		files:          make(map[string]*fileDecls),
+		nameChanges:    make(map[string]int),
+		occByName:      make(map[string]map[string][]occurrence),
+		occNamesByURI:  make(map[string][]string),
+		dependsOn:      make(map[string][]string),
+		dependedOnBy:   make(map[string]map[string]bool),
+		errByURI:       make(map[string][]Diagnostic),
+		importsByURI:   make(map[string][]importDecl),
+		connByName:     make(map[string]map[string][]connectionSite),
+		connNamesByURI: make(map[string][]string),
 
 		memberLinksByOwner: make(map[string][]memberLink),
 		contributedTo:      make(map[string][]string),
@@ -240,7 +298,7 @@ func NewIndex() *Index {
 func (ix *Index) Diagnostics(uri string) []Diagnostic {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	return append([]Diagnostic(nil), ix.errByURI[uri]...)
+	return slices.Clone(ix.errByURI[uri])
 }
 
 // SetIncludeResolverFactory configures how SetFile resolves `include
@@ -290,13 +348,15 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	if factory != nil {
 		resolver = factory()
 	}
-	declsByURI, occs, diagsByURI, importsByURI, connectionsByURI, memberLinks := Scan(uri, text, resolver, macros)
+	res := Scan(uri, text, resolver, macros)
+	declsByURI, occs, diagsByURI := res.Decls, res.Occurrences, res.Diagnostics
+	importsByURI, connsByURI, memberLinks := res.imports, res.connections, res.links
 
 	// Group occurrences by name outside the lock; occurrencesFromSVParseTokens
 	// already interned each name to a single string per file.
-	perName := make(map[string][]Occurrence)
+	perName := make(map[string][]occurrence)
 	for _, o := range occs {
-		perName[o.Name] = append(perName[o.Name], o)
+		perName[o.Name] = append(perName[o.Name], o.stored())
 	}
 
 	ix.mu.Lock()
@@ -306,8 +366,12 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	for fileURI, decls := range declsByURI {
 		touched[fileURI] = true
 		ix.removeDeclarationsLocked(fileURI)
-		ix.byURI[fileURI] = decls
-		for i, d := range decls {
+		ix.files[fileURI] = newFileDecls(decls)
+		for i := range decls {
+			d := &decls[i]
+			if _, ok := ix.byName[d.Name]; !ok {
+				ix.noteNameLocked(d.Name, +1)
+			}
 			ix.byName[d.Name] = append(ix.byName[d.Name], declRef{uri: fileURI, idx: i})
 		}
 	}
@@ -319,9 +383,8 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		touched[fileURI] = true
 		ix.importsByURI[fileURI] = imps
 	}
-	for fileURI, conns := range connectionsByURI {
+	for fileURI, conns := range connsByURI {
 		touched[fileURI] = true
-		ix.connectionsByURI[fileURI] = conns
 		ix.indexConnectionsLocked(fileURI, conns)
 	}
 	// Retract whatever the PREVIOUS scan of uri backed and this one no
@@ -343,7 +406,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	for name, list := range perName {
 		bucket := ix.occByName[name]
 		if bucket == nil {
-			bucket = make(map[string][]Occurrence)
+			bucket = make(map[string][]occurrence)
 			ix.occByName[name] = bucket
 		}
 		bucket[uri] = list
@@ -358,6 +421,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 		deps = resolver.Resolved()
 	}
 	ix.recordDependenciesLocked(uri, deps)
+	ix.syncNamesLocked()
 
 	return touchedURIs
 }
@@ -378,7 +442,7 @@ func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 		delete(ix.dependsOn, uri)
 		return
 	}
-	ix.dependsOn[uri] = append([]string(nil), deps...)
+	ix.dependsOn[uri] = slices.Clone(deps)
 	for _, dep := range deps {
 		backers := ix.dependedOnBy[dep]
 		if backers == nil {
@@ -389,16 +453,6 @@ func (ix *Index) recordDependenciesLocked(uri string, deps []string) {
 	}
 }
 
-// recordMemberLinksLocked replaces owner's contribution to the cross-
-// `include membership maps with links, retracting whatever its previous
-// scan contributed first. Retraction is bounded by owner's own link count
-// rather than the workspace's, since memberLinksByOwner already names the
-// exact keys to revisit -- this runs on every keystroke, via SetFile.
-//
-// Entries from *other* owners are deliberately left in place: two files
-// including the same header into the same container each record the link,
-// and one of them being rescanned (or losing its `include) says nothing
-// about the other.
 // recordContributionsLocked records that owner's latest scan backs exactly
 // the URIs in produced, and retracts whatever its previous scan backed and
 // this one does not. A URI left with no contributor at all has its buckets
@@ -421,11 +475,7 @@ func (ix *Index) recordContributionsLocked(owner string, produced map[string]boo
 		// arrived through an `include this file no longer has must stop
 		// resolving, or goto-definition keeps opening a header the build
 		// no longer reads.
-		ix.removeDeclarationsLocked(prev)
-		delete(ix.byURI, prev)
-		delete(ix.errByURI, prev)
-		delete(ix.importsByURI, prev)
-		delete(ix.connectionsByURI, prev)
+		ix.clearScanBucketsLocked(prev)
 		dropped = append(dropped, prev)
 	}
 
@@ -443,11 +493,21 @@ func (ix *Index) recordContributionsLocked(owner string, produced map[string]boo
 		}
 		backers[owner] = true
 	}
-	sort.Strings(now) // stable storage order; the set semantics don't depend on it
+	slices.Sort(now) // stable storage order; the set semantics don't depend on it
 	ix.contributedTo[owner] = now
 	return dropped
 }
 
+// recordMemberLinksLocked replaces owner's contribution to the cross-
+// `include membership maps with links, retracting whatever its previous
+// scan contributed first. Retraction is bounded by owner's own link count
+// rather than the workspace's, since memberLinksByOwner already names the
+// exact keys to revisit -- this runs on every keystroke, via SetFile.
+//
+// Entries from *other* owners are deliberately left in place: two files
+// including the same header into the same container each record the link,
+// and one of them being rescanned (or losing its `include) says nothing
+// about the other.
 func (ix *Index) recordMemberLinksLocked(owner string, links []memberLink) {
 	for _, l := range ix.memberLinksByOwner[owner] {
 		key := declRef{uri: l.ContainerURI, idx: l.ContainerIdx}
@@ -492,7 +552,7 @@ func dropOwner(links []ownedLink, owner string) []ownedLink {
 // otherwise stale membership would attach a header's declarations to
 // whatever now sits at that index.
 func (ix *Index) containerStillNamedLocked(uri string, idx int, name string) bool {
-	decls := ix.byURI[uri]
+	decls := ix.fileLocked(uri).decls
 	return idx >= 0 && idx < len(decls) && decls[idx].Name == name
 }
 
@@ -502,39 +562,23 @@ func (ix *Index) containerStillNamedLocked(uri string, idx int, name string) boo
 func (ix *Index) Dependents(uri string) []string {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	var out []string
-	for w := range ix.dependedOnBy[uri] {
-		out = append(out, w)
+	if len(ix.dependedOnBy[uri]) == 0 {
+		return nil
 	}
-	sort.Strings(out) // map order is nondeterministic; keep results stable
-	return out
+	return sortedKeys(ix.dependedOnBy[uri])
 }
 
 // IncludesOf is Dependents' forward counterpart: the URIs uri's own last
 // scan resolved an `include to (already the full transitive set -- see
 // dependsOn's doc comment). Used to find files reachable only via
-// `include starting from a freshly-scanned top-level file, without
-// consulting AllKnownURIs, which can still hold a stale entry from a
-// file's *previous* scan until the next rebuild's staleness pass runs.
+// `include starting from a freshly-scanned top-level file, rather than
+// every URI the index holds declarations for, which can still include a
+// stale entry from a file's *previous* scan until the next rebuild's
+// staleness pass runs.
 func (ix *Index) IncludesOf(uri string) []string {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	return append([]string(nil), ix.dependsOn[uri]...)
-}
-
-// AllKnownURIs returns every URI the index currently holds declarations
-// for -- including one discovered only via another file's `include (see
-// Scan's file-attribution behavior), not just the workspace's own
-// top-level file list. Used to widen file watching and staleness checks
-// beyond what discovery alone finds.
-func (ix *Index) AllKnownURIs() []string {
-	ix.mu.RLock()
-	defer ix.mu.RUnlock()
-	out := make([]string, 0, len(ix.byURI))
-	for uri := range ix.byURI {
-		out = append(out, uri)
-	}
-	return out
+	return slices.Clone(ix.dependsOn[uri])
 }
 
 // RemoveFile drops uri's entries entirely, returning every OTHER URI whose
@@ -544,7 +588,9 @@ func (ix *Index) AllKnownURIs() []string {
 func (ix *Index) RemoveFile(uri string) []string {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
-	return append(ix.removeLocked(uri), uri)
+	cleared := ix.removeLocked(uri)
+	ix.syncNamesLocked()
+	return append(cleared, uri)
 }
 
 // removeLocked drops uri's entries from every part of the index:
@@ -566,16 +612,23 @@ func (ix *Index) removeLocked(uri string) []string {
 			delete(ix.contributorsOf, uri)
 		}
 	}
-	ix.removeDeclarationsLocked(uri)
+	ix.clearScanBucketsLocked(uri)
 	ix.removeOccurrencesLocked(uri)
-	ix.removeConnectionsLocked(uri)
 	ix.recordMemberLinksLocked(uri, nil)
 	ix.recordDependenciesLocked(uri, nil)
-	delete(ix.byURI, uri)
+	return cleared
+}
+
+// clearScanBucketsLocked drops every bucket any scan can write for uri,
+// whether uri's own or one that reached it through an `include:
+// declarations, diagnostics, imports and connection sites, along with
+// their by-name indexes. Occurrences, member links and dependencies are
+// left alone, since only uri's own scan writes those.
+func (ix *Index) clearScanBucketsLocked(uri string) {
+	ix.removeDeclarationsLocked(uri)
+	ix.removeConnectionsLocked(uri)
 	delete(ix.errByURI, uri)
 	delete(ix.importsByURI, uri)
-	delete(ix.connectionsByURI, uri)
-	return cleared
 }
 
 // removeDeclarationsLocked drops uri's declaration entries only, leaving
@@ -585,28 +638,57 @@ func (ix *Index) removeLocked(uri string) []string {
 // which has no occurrences or dependency data of its own to touch here.
 func (ix *Index) removeDeclarationsLocked(uri string) {
 	// A file typically declares the same name only once, but prototypes
-	// and their bodies (or plain duplicates) can repeat one -- filter each
-	// name's global ref list once, not once per repeat.
-	seen := make(map[string]bool)
-	for _, d := range ix.byURI[uri] {
-		if seen[d.Name] {
-			continue
+	// and their bodies (or plain duplicates) can repeat one -- visit each
+	// name's global ref list once, not once per repeat. counts[name] is how
+	// many of that list's entries are uri's: exactly the declarations
+	// SetFile appended for it.
+	decls := ix.fileLocked(uri).decls
+	counts := make(map[string]int, len(decls))
+	for i := range decls {
+		counts[decls[i].Name]++
+	}
+	for name, own := range counts {
+		refs := ix.byName[name]
+		// SetFile appends a file's refs at the tail of each name's list, so
+		// when the file being rescanned is also the one indexed last -- the
+		// steady state while typing in one buffer -- all of its refs are
+		// still there and come off in O(own). Names like clk and rst_n are
+		// declared by thousands of modules, so filtering the whole list on
+		// every keystroke cost time proportional to the workspace, under
+		// the write lock. Only when some other file was indexed in between
+		// is the rest of the list filtered, preserving its order either way.
+		n := len(refs)
+		for own > 0 && n > 0 && refs[n-1].uri == uri {
+			n--
+			own--
 		}
-		seen[d.Name] = true
-		refs := ix.byName[d.Name]
-		filtered := refs[:0]
-		for _, r := range refs {
-			if r.uri != uri {
-				filtered = append(filtered, r)
+		kept := refs[:n]
+		if own > 0 {
+			kept = refs[:0]
+			for _, r := range refs[:n] {
+				if r.uri != uri {
+					kept = append(kept, r)
+				}
 			}
 		}
-		if len(filtered) == 0 {
-			delete(ix.byName, d.Name)
+		clear(refs[len(kept):]) // don't keep the dropped URIs alive through the backing array
+		if len(kept) == 0 {
+			delete(ix.byName, name)
+			ix.noteNameLocked(name, -1)
 		} else {
-			ix.byName[d.Name] = filtered
+			ix.byName[name] = kept
 		}
 	}
-	delete(ix.byURI, uri)
+	delete(ix.files, uri)
+}
+
+// fileLocked returns uri's fileDecls, or an empty one if the index holds
+// no declarations for uri.
+func (ix *Index) fileLocked(uri string) *fileDecls {
+	if f := ix.files[uri]; f != nil {
+		return f
+	}
+	return emptyFileDecls
 }
 
 // indexConnectionsLocked rebuilds uri's slice of connByName, retracting
@@ -658,7 +740,7 @@ func (ix *Index) removeOccurrencesLocked(uri string) {
 }
 
 func (ix *Index) locationLocked(ref declRef) Location {
-	d := ix.byURI[ref.uri][ref.idx]
+	d := &ix.fileLocked(ref.uri).decls[ref.idx]
 	return Location{URI: ref.uri, Line: d.Line, Character: d.Character, Kind: d.Kind, Prototype: d.Prototype}
 }
 
@@ -673,8 +755,9 @@ func (ix *Index) locationsLocked(refs []declRef) []Location {
 // Lookup returns every known location declaring name, with no scope
 // awareness -- a flat, global search. FindDefinition is almost always the
 // better choice for resolving a reference at a specific position; Lookup
-// remains useful for tooling that just wants "does this name exist
-// anywhere" (tests, future features like workspace symbol search).
+// remains useful where any declaration site at all is the question:
+// find-references uses it to drop declaration sites when the client asks
+// for references without them.
 func (ix *Index) Lookup(name string) ([]Location, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
@@ -755,7 +838,7 @@ func (ix *Index) HoverInfo(uri string, line, character int, word, qualifier stri
 		return Declaration{}, false
 	}
 	ref := ix.primaryRefLocked(refs)
-	return ix.byURI[ref.uri][ref.idx], true
+	return ix.fileLocked(ref.uri).decls[ref.idx], true
 }
 
 // preferGloballyLocked checks whether every location in locs already has
@@ -778,7 +861,7 @@ func (ix *Index) preferGloballyLocked(word string, refs []declRef, locs []Locati
 	kind := locs[0].Kind
 	var sameFile, sameContainer, anywhere []Location
 	for _, r := range ix.byName[word] {
-		d := ix.byURI[r.uri][r.idx]
+		d := &ix.fileLocked(r.uri).decls[r.idx]
 		if d.Kind != kind || d.Prototype != wantPrototype {
 			continue
 		}
@@ -812,16 +895,16 @@ func (ix *Index) preferGloballyLocked(word string, refs []declRef, locs []Locati
 // containerNameOfLocked returns the name of the declaration enclosing r,
 // or "" if r is at file scope.
 func (ix *Index) containerNameOfLocked(r declRef) string {
-	decls := ix.byURI[r.uri]
+	decls := ix.fileLocked(r.uri).decls
 	if parent := decls[r.idx].Parent; parent != -1 {
 		return decls[parent].Name
 	}
 	return ""
 }
 
-// isContainerKind reports whether d is a module/interface/program, the
+// isPortContainer reports whether d is a module/interface/program, the
 // three kinds that carry a port and parameter list.
-func isContainerKind(d Declaration) bool {
+func isPortContainer(d *Declaration) bool {
 	return d.Kind == KindModule || d.Kind == KindInterface || d.Kind == KindProgram
 }
 
@@ -849,18 +932,18 @@ func appendUniqueRefs(out []declRef, refs ...declRef) []declRef {
 // take one" accessor (Ports, Params, Typedef, structTypedefLocked), which
 // each used to stop at byName's first match and so answered differently
 // depending on the order files were indexed in. See primaryRefLocked.
-func (ix *Index) firstDeclLocked(name string, keep func(Declaration) bool) (declRef, Declaration, bool) {
+func (ix *Index) firstDeclLocked(name string, keep func(*Declaration) bool) (declRef, *Declaration, bool) {
 	var matches []declRef
 	for _, r := range ix.byName[name] {
-		if keep(ix.byURI[r.uri][r.idx]) {
+		if keep(&ix.fileLocked(r.uri).decls[r.idx]) {
 			matches = append(matches, r)
 		}
 	}
 	if len(matches) == 0 {
-		return declRef{}, Declaration{}, false
+		return declRef{}, nil, false
 	}
 	ref := ix.primaryRefLocked(matches)
-	return ref, ix.byURI[ref.uri][ref.idx], true
+	return ref, &ix.fileLocked(ref.uri).decls[ref.idx], true
 }
 
 // primaryRefLocked picks the one declaration a single-answer query should
@@ -875,9 +958,9 @@ func (ix *Index) firstDeclLocked(name string, keep func(Declaration) bool) (decl
 // reason -- see its topK comparator.
 func (ix *Index) primaryRefLocked(refs []declRef) declRef {
 	best := refs[0]
-	bestDecl := ix.byURI[best.uri][best.idx]
+	bestDecl := &ix.fileLocked(best.uri).decls[best.idx]
 	for _, r := range refs[1:] {
-		d := ix.byURI[r.uri][r.idx]
+		d := &ix.fileLocked(r.uri).decls[r.idx]
 		switch {
 		case r.uri != best.uri:
 			if r.uri > best.uri {
@@ -968,8 +1051,8 @@ func (ix *Index) resolveRefsLocked(uri string, line, character int, word, qualif
 
 	var out []declRef
 	for _, r := range ix.byName[word] {
-		d := ix.byURI[r.uri][r.idx]
-		if GloballyReferenceableKinds[d.Kind] {
+		d := &ix.fileLocked(r.uri).decls[r.idx]
+		if IsGloballyReferenceable(d.Kind) {
 			out = append(out, r)
 		}
 	}
@@ -999,15 +1082,15 @@ func (ix *Index) importVisibleAtLocked(imp importDecl, ancestors map[int]bool) b
 // ancestorScopesLocked returns every container index enclosing (line,
 // character) in uri.
 //
-// Computed once per request rather than per import: innermostContaining is
-// an O(declarations-in-file) scan and the chain walk another, and
-// importVisibleAtLocked used to redo both for every import statement in
-// the file. A UVM-style file with 30 imports and 3,000 declarations did
-// that work 30 times over for one identical answer.
+// Computed once per request rather than per import: the container search
+// and the chain walk are the same for every import statement in the file,
+// and importVisibleAtLocked used to redo both for each one. A UVM-style
+// file with 30 imports did that work 30 times over for one identical
+// answer.
 func (ix *Index) ancestorScopesLocked(uri string, line, character int) map[int]bool {
-	decls := ix.byURI[uri]
+	f := ix.fileLocked(uri)
 	out := make(map[int]bool)
-	for idx := innermostContaining(decls, line, character); idx != -1; idx = decls[idx].Parent {
+	for idx := f.innermostContaining(line, character); idx != -1; idx = f.decls[idx].Parent {
 		out[idx] = true
 	}
 	return out
@@ -1064,7 +1147,7 @@ func (ix *Index) importMemberRefsLocked(imp importDecl, word string) []declRef {
 	}
 	var out []declRef
 	for _, qref := range ix.byName[imp.Package] {
-		if ix.byURI[qref.uri][qref.idx].Kind != KindPackage {
+		if ix.fileLocked(qref.uri).decls[qref.idx].Kind != KindPackage {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, word)...)
@@ -1132,7 +1215,7 @@ func (ix *Index) lookupInIncludesRefsLocked(uri, word string) ([]declRef, bool) 
 		// -- resolving it here is a WRONG answer that masks a real compile
 		// error, and hover and rename then propagate it. Same rule
 		// childRefsLocked applies to the membership direction.
-		if depSet[r.uri] && ix.byURI[r.uri][r.idx].Parent == -1 {
+		if depSet[r.uri] && ix.fileLocked(r.uri).decls[r.idx].Parent == -1 {
 			out = append(out, r)
 		}
 	}
@@ -1150,8 +1233,11 @@ func (ix *Index) lookupInIncludesRefsLocked(uri, word string) ([]declRef, bool) 
 func (ix *Index) Ports(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
-	return d.Ports, ok
+	_, d, ok := ix.firstDeclLocked(name, isPortContainer)
+	if !ok {
+		return nil, false
+	}
+	return d.Ports(), true
 }
 
 // Params returns the overridable ("parameter", not "localparam") entries
@@ -1162,8 +1248,11 @@ func (ix *Index) Ports(name string) ([]Port, bool) {
 func (ix *Index) Params(name string) ([]Port, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	_, d, ok := ix.firstDeclLocked(name, isContainerKind)
-	return d.Params, ok
+	_, d, ok := ix.firstDeclLocked(name, isPortContainer)
+	if !ok {
+		return nil, false
+	}
+	return d.Params(), true
 }
 
 // StructFieldLocation returns where field is declared inside the struct or
@@ -1211,13 +1300,13 @@ func (ix *Index) StructFields(typeName string) ([]Port, bool) {
 // look up instead (see Declaration.Fields, which reuses Port's
 // name-and-detail shape and carries no position).
 func (ix *Index) structTypedefLocked(typeName string) (declRef, []Port, bool) {
-	ref, d, ok := ix.firstDeclLocked(typeName, func(d Declaration) bool {
-		return d.Kind == KindTypedef && (d.TypedefKind == "struct" || d.TypedefKind == "union")
+	ref, d, ok := ix.firstDeclLocked(typeName, func(d *Declaration) bool {
+		return d.Kind == KindTypedef && (d.TypedefKind() == TypedefStruct || d.TypedefKind() == TypedefUnion)
 	})
 	if !ok {
 		return declRef{}, nil, false
 	}
-	return ref, d.Fields, true
+	return ref, d.Fields(), true
 }
 
 // ScopedOccurrencesForStructField returns every occurrence of field that is
@@ -1268,11 +1357,7 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 	decl := fields[i]
 
 	bucket := ix.occByName[field]
-	uris := make([]string, 0, len(bucket))
-	for u := range bucket {
-		uris = append(uris, u)
-	}
-	sort.Strings(uris) // map order is nondeterministic; occurrencesLocked sorts for the same reason
+	uris := sortedKeys(bucket)
 
 	// One file accesses the same receiver over and over ("txn.addr" 300
 	// times), and each resolution walks that file's whole declaration
@@ -1288,14 +1373,15 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 
 	var out []Location
 	for _, u := range uris {
+		f := ix.fileLocked(u)
 		for _, occ := range bucket[u] {
 			var keep bool
 			switch {
-			case occ.Receiver != "":
-				key := receiverKey{u, occ.Receiver, innermostContaining(ix.byURI[u], occ.Line, occ.Character)}
+			case occ.receiver() != "":
+				key := receiverKey{u, occ.receiver(), f.innermostContaining(int(occ.line), int(occ.character))}
 				t, seen := memo[key]
 				if !seen {
-					t, _ = ix.receiverTypeNameLocked(u, occ.Line, occ.Character, occ.Receiver, "", false)
+					t, _ = ix.receiverTypeNameLocked(u, int(occ.line), int(occ.character), occ.receiver(), "", false)
 					memo[key] = t
 				}
 				keep = t != "" && t == typeName
@@ -1306,10 +1392,10 @@ func (ix *Index) ScopedOccurrencesForStructField(uri string, line, character int
 				// has -- a struct body pulled in across an `include boundary
 				// therefore won't match here, the same cross-file gap
 				// Declaration.Fields has generally.
-				keep = occ.Line == decl.Line && occ.Character == decl.Character
+				keep = int(occ.line) == decl.Line && int(occ.character) == decl.Character
 			}
 			if keep {
-				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+				out = append(out, Location{URI: u, Line: int(occ.line), Character: int(occ.character)})
 			}
 		}
 	}
@@ -1325,7 +1411,7 @@ func (ix *Index) receiverTypeNameLocked(uri string, line, character int, receive
 		return "", false
 	}
 	ref := ix.primaryRefLocked(refs)
-	if d := ix.byURI[ref.uri][ref.idx]; d.TypeName != "" {
+	if d := ix.fileLocked(ref.uri).decls[ref.idx]; d.TypeName != "" {
 		return d.TypeName, true
 	}
 	return "", false
@@ -1341,8 +1427,11 @@ func (ix *Index) receiverTypeNameLocked(uri string, line, character int, receive
 func (ix *Index) Typedef(name string) (Declaration, bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	_, d, ok := ix.firstDeclLocked(name, func(d Declaration) bool { return d.Kind == KindTypedef })
-	return d, ok
+	_, d, ok := ix.firstDeclLocked(name, func(d *Declaration) bool { return d.Kind == KindTypedef })
+	if !ok {
+		return Declaration{}, false
+	}
+	return *d, true
 }
 
 // Occurrences returns every identifier occurrence of name across the
@@ -1380,7 +1469,7 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 	}
 
 	ref := ix.primaryRefLocked(refs)
-	d := ix.byURI[ref.uri][ref.idx]
+	d := &ix.fileLocked(ref.uri).decls[ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
 		if ix.filtersUnrelatedLocked(ref, d) {
@@ -1397,23 +1486,23 @@ func (ix *Index) OccurrencesInFile(uri string, line, character int, word, qualif
 
 	var out []Location
 	for _, occ := range ix.occByName[word][uri] {
-		if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+		if !posWithinBounds(int(occ.line), int(occ.character), container.Line, container.Character, container.EndLine, container.EndCharacter) {
 			continue
 		}
-		out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: uri, Line: int(occ.line), Character: int(occ.character)})
 	}
 	out = append(out, ix.connectionOccurrencesInFileLocked(ref.uri, d, word, uri)...)
 	return append(out, ix.namedArgOccurrencesInFileLocked(ref.uri, d, container, word, uri)...)
 }
 
-func (ix *Index) namedArgOccurrencesInFileLocked(subURI string, d, sub Declaration, word, uri string) []Location {
+func (ix *Index) namedArgOccurrencesInFileLocked(subURI string, d, sub *Declaration, word, uri string) []Location {
 	if d.Kind != KindArgument {
 		return nil
 	}
 	return ix.namedArgOccurrencesLocked(subURI, sub, word, uri)
 }
 
-func (ix *Index) connectionOccurrencesInFileLocked(containerURI string, d Declaration, word, uri string) []Location {
+func (ix *Index) connectionOccurrencesInFileLocked(containerURI string, d *Declaration, word, uri string) []Location {
 	if d.Kind != KindPort && d.Kind != KindParameter {
 		return nil
 	}
@@ -1431,7 +1520,7 @@ func (ix *Index) occurrencesInFileLocked(name, uri string) []Location {
 	occs := ix.occByName[name][uri]
 	out := make([]Location, 0, len(occs))
 	for _, occ := range occs {
-		out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: uri, Line: int(occ.line), Character: int(occ.character)})
 	}
 	return out
 }
@@ -1448,12 +1537,12 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 		uris = append(uris, uri)
 		total += len(occs)
 	}
-	sort.Strings(uris)
+	slices.Sort(uris)
 
 	out := make([]Location, 0, total)
 	for _, uri := range uris {
 		for _, occ := range bucket[uri] {
-			out = append(out, Location{URI: uri, Line: occ.Line, Character: occ.Character})
+			out = append(out, Location{URI: uri, Line: int(occ.line), Character: int(occ.character)})
 		}
 	}
 	return out
@@ -1467,7 +1556,7 @@ func (ix *Index) occurrencesLocked(name string) []Location {
 //   - If word doesn't resolve to a known declaration at all, there's
 //     nothing to restrict by -- return every occurrence of the raw text.
 //   - If it resolves to a module/interface/program/class/package (see
-//     GloballyReferenceableKinds), those are meant to be referenced from
+//     IsGloballyReferenceable), those are meant to be referenced from
 //     anywhere, so the search stays workspace-wide.
 //   - If it resolves to a function/task/typedef/enum member declared
 //     directly inside a module/interface/program, the search is
@@ -1513,7 +1602,7 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	}
 
 	ref := ix.primaryRefLocked(refs)
-	d := ix.byURI[ref.uri][ref.idx]
+	d := &ix.fileLocked(ref.uri).decls[ref.idx]
 	container, restrict := ix.containerScopeLocked(ref.uri, d)
 	if !restrict {
 		if ix.filtersUnrelatedLocked(ref, d) {
@@ -1525,16 +1614,16 @@ func (ix *Index) ScopedOccurrences(uri string, line, character int, word, qualif
 	var out []Location
 	conn := ix.connectionPositionsLocked(word, ref.uri)
 	for _, occ := range ix.occByName[word][ref.uri] {
-		if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+		if !posWithinBounds(int(occ.line), int(occ.character), container.Line, container.Character, container.EndLine, container.EndCharacter) {
 			continue
 		}
 		// A ".name(" connection token names the instantiated module's
 		// port/parameter, not this declaration; connectionOccurrencesLocked
 		// re-adds the ones that really target it.
-		if conn[[2]int{occ.Line, occ.Character}] {
+		if conn[[2]int{int(occ.line), int(occ.character)}] {
 			continue
 		}
-		out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character})
+		out = append(out, Location{URI: ref.uri, Line: int(occ.line), Character: int(occ.character)})
 	}
 	if d.Kind == KindPort || d.Kind == KindParameter {
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, word, d.Kind)...)
@@ -1574,27 +1663,21 @@ func dedupLocations(locs []Location) []Location {
 // callee isn't resolved, so this over-approximates on purpose; dropping a
 // real call site would leave rename half done. Only uri is searched when
 // onlyURI is non-empty.
-func (ix *Index) namedArgOccurrencesLocked(subURI string, sub Declaration, name, onlyURI string) []Location {
+func (ix *Index) namedArgOccurrencesLocked(subURI string, sub *Declaration, name, onlyURI string) []Location {
 	bucket := ix.occByName[name]
-	uris := make([]string, 0, len(bucket))
-	for u := range bucket {
-		if onlyURI == "" || u == onlyURI {
-			uris = append(uris, u)
-		}
-	}
-	sort.Strings(uris)
+	uris := urisIn(bucket, onlyURI)
 
 	var out []Location
 	for _, u := range uris {
 		conn := ix.connectionPositionsLocked(name, u)
 		for _, occ := range bucket[u] {
-			if !occ.NamedArg || conn[[2]int{occ.Line, occ.Character}] {
+			if !occ.namedArg() || conn[[2]int{int(occ.line), int(occ.character)}] {
 				continue
 			}
-			if u == subURI && posWithinBounds(occ.Line, occ.Character, sub.Line, sub.Character, sub.EndLine, sub.EndCharacter) {
+			if u == subURI && posWithinBounds(int(occ.line), int(occ.character), sub.Line, sub.Character, sub.EndLine, sub.EndCharacter) {
 				continue // already in the span result
 			}
-			out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+			out = append(out, Location{URI: u, Line: int(occ.line), Character: int(occ.character)})
 		}
 	}
 	return out
@@ -1605,11 +1688,11 @@ func (ix *Index) namedArgOccurrencesLocked(subURI string, sub Declaration, name,
 // declaration that is a package member or sits at file scope. Both can be
 // referenced from any file, so they can't be span-restricted, but both
 // obey the same drop rules.
-func (ix *Index) filtersUnrelatedLocked(ref declRef, d Declaration) bool {
-	if GloballyReferenceableKinds[d.Kind] {
+func (ix *Index) filtersUnrelatedLocked(ref declRef, d *Declaration) bool {
+	if IsGloballyReferenceable(d.Kind) {
 		return false
 	}
-	return d.Parent == -1 || ix.byURI[ref.uri][d.Parent].Kind == KindPackage
+	return d.Parent == -1 || ix.fileLocked(ref.uri).decls[d.Parent].Kind == KindPackage
 }
 
 // filteredOccurrencesLocked returns the workspace-wide occurrences of
@@ -1641,20 +1724,14 @@ func (ix *Index) filteredOccurrencesLocked(name string, refs []declRef, primary 
 	f := ix.newOccurrenceFilterLocked(name, refs, primary, qURI, qLine, qChar)
 
 	bucket := ix.occByName[name]
-	uris := make([]string, 0, len(bucket))
-	for u := range bucket {
-		if onlyURI == "" || u == onlyURI {
-			uris = append(uris, u)
-		}
-	}
-	sort.Strings(uris)
+	uris := urisIn(bucket, onlyURI)
 
 	var out []Location
 	for _, u := range uris {
 		conn := ix.connectionPositionsLocked(name, u)
 		for _, occ := range bucket[u] {
 			if f.keep(u, occ, conn) {
-				out = append(out, Location{URI: u, Line: occ.Line, Character: occ.Character})
+				out = append(out, Location{URI: u, Line: int(occ.line), Character: int(occ.character)})
 			}
 		}
 	}
@@ -1681,7 +1758,7 @@ type occurrenceFilter struct {
 	ix      *Index
 	name    string
 	targets map[declRef]bool
-	// localDecls[uri] lists the indices (into ix.byURI[uri]) of every
+	// localDecls[uri] lists the indices (into ix.fileLocked(uri).decls) of every
 	// declaration named name whose parent is a container: the only
 	// declarations that can shadow the target. Most files have none.
 	localDecls map[string][]int
@@ -1696,7 +1773,7 @@ type occurrenceFilter struct {
 }
 
 func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary declRef, qURI string, qLine, qChar int) *occurrenceFilter {
-	d := ix.byURI[primary.uri][primary.idx]
+	d := &ix.fileLocked(primary.uri).decls[primary.idx]
 	f := &occurrenceFilter{
 		ix:            ix,
 		name:          name,
@@ -1714,8 +1791,8 @@ func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary 
 		f.targets[r] = true
 	}
 	for _, r := range ix.byName[name] {
-		decls := ix.byURI[r.uri]
-		if p := decls[r.idx].Parent; p != -1 && containerKinds[decls[p].Kind] {
+		decls := ix.fileLocked(r.uri).decls
+		if p := decls[r.idx].Parent; p != -1 && isContainerKind(decls[p].Kind) {
 			f.localDecls[r.uri] = append(f.localDecls[r.uri], r.idx)
 		}
 	}
@@ -1724,29 +1801,29 @@ func (ix *Index) newOccurrenceFilterLocked(name string, refs []declRef, primary 
 
 // keep applies the drop rules to one occurrence in uri; conn is uri's
 // connectionPositionsLocked.
-func (f *occurrenceFilter) keep(uri string, occ Occurrence, conn map[[2]int]bool) bool {
+func (f *occurrenceFilter) keep(uri string, occ occurrence, conn map[[2]int]bool) bool {
 	if f.isAnchor(uri, occ) {
 		return true
 	}
-	if conn[[2]int{occ.Line, occ.Character}] {
+	if conn[[2]int{int(occ.line), int(occ.character)}] {
 		return false
 	}
-	if occ.Receiver != "" {
+	if occ.receiver() != "" {
 		return false
 	}
-	if occ.Qualifier != "" {
-		return !f.qualifiedElsewhere(occ.Qualifier)
+	if occ.qualifier() != "" {
+		return !f.qualifiedElsewhere(occ.qualifier())
 	}
 	return !f.shadowed(uri, occ)
 }
 
 // isAnchor reports whether occ is the query position or the target's own
 // declaration site, which are never dropped.
-func (f *occurrenceFilter) isAnchor(uri string, occ Occurrence) bool {
-	if uri == f.qURI && occ.Line == f.qLine && f.qChar >= occ.Character && f.qChar <= occ.Character+len(f.name) {
+func (f *occurrenceFilter) isAnchor(uri string, occ occurrence) bool {
+	if uri == f.qURI && int(occ.line) == f.qLine && f.qChar >= int(occ.character) && f.qChar <= int(occ.character)+len(f.name) {
 		return true
 	}
-	return uri == f.declURI && occ.Line == f.declLine && occ.Character == f.declCharacter
+	return uri == f.declURI && int(occ.line) == f.declLine && int(occ.character) == f.declCharacter
 }
 
 // qualifiedElsewhere reports whether qualifier::name resolves, and to
@@ -1778,16 +1855,16 @@ func (f *occurrenceFilter) qualifiedElsewhere(qualifier string) bool {
 // closer declaration, lexical or inherited, hides a package or file-scope
 // name. An inherited one (a class member of an unseen base class) is
 // simply not detected, which keeps an extra hit rather than dropping one.
-func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
+func (f *occurrenceFilter) shadowed(uri string, occ occurrence) bool {
 	cands := f.localDecls[uri]
 	if len(cands) == 0 {
 		return false
 	}
-	decls := f.ix.byURI[uri]
+	decls := f.ix.fileLocked(uri).decls
 	scope := -1
 	for _, i := range cands {
 		p := decls[i].Parent
-		if posWithin(decls[p], occ.Line, occ.Character) && (scope == -1 || narrower(decls[p], decls[scope])) {
+		if posWithin(&decls[p], int(occ.line), int(occ.character)) && (scope == -1 || narrower(&decls[p], &decls[scope])) {
 			scope = p
 		}
 	}
@@ -1805,16 +1882,16 @@ func (f *occurrenceFilter) shadowed(uri string, occ Occurrence) bool {
 // containerScopeLocked returns d's enclosing container and whether it's
 // safe to restrict an occurrence search to that container's span -- see
 // ScopedOccurrences for the reasoning.
-func (ix *Index) containerScopeLocked(uri string, d Declaration) (Declaration, bool) {
-	if GloballyReferenceableKinds[d.Kind] || d.Parent == -1 {
-		return Declaration{}, false
+func (ix *Index) containerScopeLocked(uri string, d *Declaration) (*Declaration, bool) {
+	if IsGloballyReferenceable(d.Kind) || d.Parent == -1 {
+		return nil, false
 	}
-	parent := ix.byURI[uri][d.Parent]
+	parent := &ix.fileLocked(uri).decls[d.Parent]
 	if d.Kind == KindArgument {
 		return parent, parent.Kind == KindFunction || parent.Kind == KindTask
 	}
 	if parent.Kind != KindModule && parent.Kind != KindInterface && parent.Kind != KindProgram {
-		return Declaration{}, false
+		return nil, false
 	}
 	return parent, true
 }
@@ -1834,20 +1911,35 @@ func (ix *Index) connectionOccurrencesLocked(containerURI string, containerIdx i
 	if len(bucket) == 0 {
 		return nil
 	}
+	// Collected inline rather than through sortedKeys: this runs for every
+	// port and parameter reference query, and the generic helper's map
+	// iteration measured slower here.
 	uris := make([]string, 0, len(bucket))
 	for uri := range bucket {
 		uris = append(uris, uri)
 	}
-	sort.Strings(uris) // map order is nondeterministic; keep results stable
+	slices.Sort(uris) // map order is nondeterministic; keep results stable
+
+	// A file's sites mostly connect one module type after another (every
+	// port of one instantiation, then the next), so the last type's answer
+	// is kept rather than walking its declarations again for each site.
+	var lastType string
+	var lastHit, haveLast bool
+	targets := func(moduleType string) bool {
+		if !haveLast || moduleType != lastType {
+			lastType, haveLast = moduleType, true
+			lastHit = slices.ContainsFunc(ix.byName[moduleType], func(q declRef) bool {
+				return q.uri == containerURI && q.idx == containerIdx
+			})
+		}
+		return lastHit
+	}
 
 	var out []Location
 	for _, uri := range uris {
 		for _, site := range bucket[uri] {
-			for _, qref := range ix.byName[site.ModuleType] {
-				if qref.uri == containerURI && qref.idx == containerIdx {
-					out = append(out, Location{URI: uri, Line: site.Line, Character: site.Character, Kind: kind})
-					break
-				}
+			if targets(site.ModuleType) {
+				out = append(out, Location{URI: uri, Line: site.Line, Character: site.Character, Kind: kind})
 			}
 		}
 	}
@@ -1884,17 +1976,17 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 
 	var out []Location
 	for _, ref := range refs {
-		d := ix.byURI[ref.uri][ref.idx]
+		d := &ix.fileLocked(ref.uri).decls[ref.idx]
 		if container, restrict := ix.containerScopeLocked(ref.uri, d); restrict {
 			conn := ix.connectionPositionsLocked(name, ref.uri)
 			for _, occ := range ix.occByName[name][ref.uri] {
-				if !posWithinBounds(occ.Line, occ.Character, container.Line, container.Character, container.EndLine, container.EndCharacter) {
+				if !posWithinBounds(int(occ.line), int(occ.character), container.Line, container.Character, container.EndLine, container.EndCharacter) {
 					continue
 				}
-				if conn[[2]int{occ.Line, occ.Character}] {
+				if conn[[2]int{int(occ.line), int(occ.character)}] {
 					continue
 				}
-				out = append(out, Location{URI: ref.uri, Line: occ.Line, Character: occ.Character, Kind: d.Kind})
+				out = append(out, Location{URI: ref.uri, Line: int(occ.line), Character: int(occ.character), Kind: d.Kind})
 			}
 		}
 		out = append(out, ix.connectionOccurrencesLocked(ref.uri, d.Parent, name, d.Kind)...)
@@ -1914,26 +2006,24 @@ func (ix *Index) ScopedOccurrencesForInstantiationConnection(moduleName, name st
 //
 // truncated reports that at least one further match existed beyond limit,
 // so the caller can mark its response incomplete. A limit <= 0 means no cap
-// (truncated is then always false). Selecting the limit best rather than
-// sorting everything and slicing keeps a short prefix in a large workspace
-// from allocating the whole symbol table per keystroke -- see topK.
+// (truncated is then always false). The matches are a contiguous run of
+// the sorted name list (see sortedNamesLocked), found by binary search, so
+// a request costs its result size rather than a pass over every name in
+// the workspace -- completion runs on every keystroke.
 func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, truncated bool) {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 
-	top := newTopK(limit, func(a, b Symbol) bool { return a.Name < b.Name })
-	for name, refs := range ix.byName {
-		if prefix != "" && !strings.HasPrefix(name, prefix) {
-			continue
+	names := ix.sortedNamesLocked()
+	i, _ := slices.BinarySearch(names, prefix)
+	for ; i < len(names) && strings.HasPrefix(names[i], prefix); i++ {
+		if limit > 0 && len(syms) == limit {
+			return syms, true
 		}
-		if len(refs) == 0 {
-			continue
-		}
-		ref := ix.primaryRefLocked(refs)
-		d := ix.byURI[ref.uri][ref.idx]
-		top.push(Symbol{Name: name, Kind: d.Kind})
+		ref := ix.primaryRefLocked(ix.byName[names[i]])
+		syms = append(syms, Symbol{Name: names[i], Kind: ix.fileLocked(ref.uri).decls[ref.idx].Kind})
 	}
-	return top.sorted()
+	return syms, false
 }
 
 // childRefsLocked returns every declRef that's a direct child of the
@@ -1951,8 +2041,9 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 // members of the same package scope, so both are found here.
 func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []declRef {
 	var out []declRef
-	for i, d := range ix.byURI[uri] {
-		if d.Parent == containerIdx && d.Name == name {
+	f := ix.fileLocked(uri)
+	for _, i := range f.named(name) {
+		if f.decls[i].Parent == containerIdx {
 			out = append(out, declRef{uri: uri, idx: i})
 		}
 	}
@@ -1960,11 +2051,12 @@ func (ix *Index) childRefsLocked(uri string, containerIdx int, name string) []de
 		if !ix.containerStillNamedLocked(uri, containerIdx, l.ContainerName) {
 			continue
 		}
-		for i, d := range ix.byURI[l.IncludedURI] {
+		included := ix.fileLocked(l.IncludedURI)
+		for _, i := range included.named(name) {
 			// Only file scope: nesting *within* the included file is
 			// tracked normally, so a typedef inside a class inside the
 			// header is that class's child, not the container's.
-			if d.Parent != -1 || d.Name != name {
+			if included.decls[i].Parent != -1 {
 				continue
 			}
 			// The same header included by two different files yields two
@@ -2045,7 +2137,7 @@ func (ix *Index) containerImportRefsLocked(containerURI string, containerIdx int
 func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[qualifier] {
-		qd := ix.byURI[qref.uri][qref.idx]
+		qd := &ix.fileLocked(qref.uri).decls[qref.idx]
 		switch qd.Kind {
 		case KindClass, KindPackage:
 			out = append(out, ix.childRefsLocked(qref.uri, qref.idx, name)...)
@@ -2061,7 +2153,7 @@ func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, b
 			// sibling declared in the same enclosing scope (e.g. a
 			// localparam that happens to share the enum member's name).
 			for _, ref := range ix.childRefsLocked(qref.uri, qd.Parent, name) {
-				if ix.byURI[ref.uri][ref.idx].Kind == KindEnumMember {
+				if ix.fileLocked(ref.uri).decls[ref.idx].Kind == KindEnumMember {
 					out = append(out, ref)
 				}
 			}
@@ -2086,7 +2178,7 @@ func (ix *Index) lookupQualifiedRefsLocked(qualifier, name string) ([]declRef, b
 func (ix *Index) lookupInstantiationPortRefsLocked(moduleName, portName string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[moduleName] {
-		if !isContainerKind(ix.byURI[qref.uri][qref.idx]) {
+		if !isPortContainer(&ix.fileLocked(qref.uri).decls[qref.idx]) {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, portName)...)
@@ -2131,7 +2223,7 @@ func (ix *Index) InstantiationPortInfo(moduleName, portName string) (Declaration
 		return Declaration{}, false
 	}
 	ref := ix.primaryRefLocked(refs)
-	return ix.byURI[ref.uri][ref.idx], true
+	return ix.fileLocked(ref.uri).decls[ref.idx], true
 }
 
 // lookupModportRefsLocked resolves modportName against interfaceName's own
@@ -2142,7 +2234,7 @@ func (ix *Index) InstantiationPortInfo(moduleName, portName string) (Declaration
 func (ix *Index) lookupModportRefsLocked(interfaceName, modportName string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[interfaceName] {
-		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+		if ix.fileLocked(qref.uri).decls[qref.idx].Kind != KindInterface {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, modportName)...)
@@ -2177,7 +2269,7 @@ func (ix *Index) ModportInfo(interfaceName, modportName string) (Declaration, bo
 		return Declaration{}, false
 	}
 	ref := ix.primaryRefLocked(refs)
-	return ix.byURI[ref.uri][ref.idx], true
+	return ix.fileLocked(ref.uri).decls[ref.idx], true
 }
 
 // lookupInterfaceMemberRefsLocked resolves memberName against
@@ -2193,7 +2285,7 @@ func (ix *Index) ModportInfo(interfaceName, modportName string) (Declaration, bo
 func (ix *Index) lookupInterfaceMemberRefsLocked(interfaceName, memberName string) ([]declRef, bool) {
 	var out []declRef
 	for _, qref := range ix.byName[interfaceName] {
-		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+		if ix.fileLocked(qref.uri).decls[qref.idx].Kind != KindInterface {
 			continue
 		}
 		out = append(out, ix.childRefsLocked(qref.uri, qref.idx, memberName)...)
@@ -2230,7 +2322,7 @@ func (ix *Index) InterfaceMemberInfo(interfaceName, memberName string) (Declarat
 		return Declaration{}, false
 	}
 	ref := ix.primaryRefLocked(refs)
-	return ix.byURI[ref.uri][ref.idx], true
+	return ix.fileLocked(ref.uri).decls[ref.idx], true
 }
 
 // InterfaceMembers returns interfaceName's own signal-shaped members
@@ -2247,11 +2339,13 @@ func (ix *Index) InterfaceMembers(interfaceName string) ([]Port, bool) {
 	found := false
 	var ports []Port
 	for _, qref := range ix.byName[interfaceName] {
-		if ix.byURI[qref.uri][qref.idx].Kind != KindInterface {
+		if ix.fileLocked(qref.uri).decls[qref.idx].Kind != KindInterface {
 			continue
 		}
 		found = true
-		for _, m := range ix.byURI[qref.uri] {
+		decls := ix.fileLocked(qref.uri).decls
+		for i := range decls {
+			m := &decls[i]
 			if m.Parent != qref.idx {
 				continue
 			}
@@ -2272,8 +2366,9 @@ func (ix *Index) InterfaceMembers(interfaceName string) ([]Port, bool) {
 // *child* of some enclosing container -- it has no path to a match for a
 // declaration that has no enclosing container of its own at all.
 func (ix *Index) lookupSelfRefLocked(uri string, line, character int, word string) ([]declRef, bool) {
-	for i, d := range ix.byURI[uri] {
-		if d.Name == word && posWithin(d, line, character) {
+	f := ix.fileLocked(uri)
+	for _, i := range f.named(word) {
+		if posWithin(&f.decls[i], line, character) {
 			return []declRef{{uri: uri, idx: i}}, true
 		}
 	}
@@ -2286,19 +2381,20 @@ func (ix *Index) lookupSelfRefLocked(uri string, line, character int, word strin
 // both "file scope" and the loop's terminator, so a file-scope typedef
 // used inside a module in the same file would otherwise never match.
 func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name string) ([]declRef, bool) {
-	decls := ix.byURI[uri]
-	idx := innermostContaining(decls, line, character)
+	f := ix.fileLocked(uri)
+	named := f.named(name)
+	idx := f.innermostContaining(line, character)
 	for idx != -1 {
 		var out []declRef
-		for i, d := range decls {
-			if d.Parent == idx && d.Name == name {
+		for _, i := range named {
+			if f.decls[i].Parent == idx {
 				out = append(out, declRef{uri: uri, idx: i})
 			}
 		}
 		if len(out) > 0 {
 			return out, true
 		}
-		idx = decls[idx].Parent
+		idx = f.decls[idx].Parent
 	}
 	if out := ix.childRefsLocked(uri, -1, name); len(out) > 0 {
 		return out, true
@@ -2306,25 +2402,7 @@ func (ix *Index) lookupInScopeRefsLocked(uri string, line, character int, name s
 	return nil, false
 }
 
-// innermostContaining returns the index of the smallest container
-// declaration whose span contains (line, character), or -1 if none does.
-func innermostContaining(decls []Declaration, line, character int) int {
-	best := -1
-	for i, d := range decls {
-		if !containerKinds[d.Kind] {
-			continue
-		}
-		if !posWithin(d, line, character) {
-			continue
-		}
-		if best == -1 || narrower(d, decls[best]) {
-			best = i
-		}
-	}
-	return best
-}
-
-func posWithin(d Declaration, line, character int) bool {
+func posWithin(d *Declaration, line, character int) bool {
 	return posWithinBounds(line, character, d.Line, d.Character, d.EndLine, d.EndCharacter)
 }
 
@@ -2336,7 +2414,7 @@ func posWithinBounds(line, character, startLine, startChar, endLine, endChar int
 }
 
 // narrower reports whether a's span is nested within (no wider than) b's.
-func narrower(a, b Declaration) bool {
+func narrower(a, b *Declaration) bool {
 	return !before(a.Line, a.Character, b.Line, b.Character) &&
 		!before(b.EndLine, b.EndCharacter, a.EndLine, a.EndCharacter)
 }
@@ -2348,13 +2426,6 @@ func before(l1, c1, l2, c2 int) bool {
 	return c1 < c2
 }
 
-// FileCount reports how many files currently have entries in the index.
-func (ix *Index) FileCount() int {
-	ix.mu.RLock()
-	defer ix.mu.RUnlock()
-	return len(ix.byURI)
-}
-
 // FileDeclarations returns a copy of uri's declarations, in the same order
 // and with the same Parent indices ScanDeclarations produced, for building
 // a per-file symbol tree (documentSymbol) or filtering by kind
@@ -2362,7 +2433,7 @@ func (ix *Index) FileCount() int {
 func (ix *Index) FileDeclarations(uri string) []Declaration {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
-	decls := ix.byURI[uri]
+	decls := ix.fileLocked(uri).decls
 	out := make([]Declaration, len(decls))
 	copy(out, decls)
 	return out
@@ -2371,7 +2442,7 @@ func (ix *Index) FileDeclarations(uri string) []Declaration {
 // IsContainer reports whether kind can hold other declarations, and so
 // participates in the scope chain and gets its own folding range.
 func IsContainer(kind Kind) bool {
-	return containerKinds[kind]
+	return isContainerKind(kind)
 }
 
 // WorkspaceSymbols returns the first limit declarations whose name contains
@@ -2396,17 +2467,17 @@ func (ix *Index) WorkspaceSymbols(query string, limit int) (syms []SymbolLocatio
 	defer ix.mu.RUnlock()
 
 	query = strings.ToLower(query)
-	top := newTopK(limit, func(a, b SymbolLocation) bool {
-		switch {
-		case a.Name != b.Name:
-			return a.Name < b.Name
-		case a.URI != b.URI:
-			return a.URI < b.URI
-		case a.Line != b.Line:
-			return a.Line < b.Line
-		default:
-			return a.Character < b.Character
+	top := newTopK(limit, func(a, b SymbolLocation) int {
+		if c := strings.Compare(a.Name, b.Name); c != 0 {
+			return c
 		}
+		if c := strings.Compare(a.URI, b.URI); c != 0 {
+			return c
+		}
+		if c := cmp.Compare(a.Line, b.Line); c != 0 {
+			return c
+		}
+		return cmp.Compare(a.Character, b.Character)
 	})
 	for name, refs := range ix.byName {
 		// strings.ToLower returns its input unchanged, without allocating,
@@ -2420,7 +2491,7 @@ func (ix *Index) WorkspaceSymbols(query string, limit int) (syms []SymbolLocatio
 			continue
 		}
 		for _, r := range refs {
-			d := ix.byURI[r.uri][r.idx]
+			d := &ix.fileLocked(r.uri).decls[r.idx]
 			top.push(SymbolLocation{Name: name, Kind: d.Kind, URI: r.uri, Line: d.Line, Character: d.Character})
 		}
 	}
@@ -2448,4 +2519,30 @@ func FindOccurrences(text string, name string) []Occurrence {
 		}
 	}
 	return out
+}
+
+// sortedKeys returns m's keys in ascending order: map iteration order is
+// random, and results built from a map have to come out the same on every
+// call. Unlike slices.Sorted(maps.Keys(m)) it sizes the slice once up
+// front, which matters on the per-request paths that call it.
+func sortedKeys[V any](m map[string]V) []string {
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	slices.Sort(keys)
+	return keys
+}
+
+// urisIn is sortedKeys(bucket) restricted to onlyURI when that's
+// non-empty, which document highlight uses to look at one file without
+// iterating every file the name occurs in.
+func urisIn[V any](bucket map[string]V, onlyURI string) []string {
+	if onlyURI == "" {
+		return sortedKeys(bucket)
+	}
+	if _, ok := bucket[onlyURI]; ok {
+		return []string{onlyURI}
+	}
+	return nil
 }

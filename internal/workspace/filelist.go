@@ -4,8 +4,10 @@ import (
 	"bufio"
 	"context"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 )
@@ -19,6 +21,12 @@ var filelistExtensions = map[string]bool{
 	".fl":  true,
 	".lst": true,
 }
+
+// maxFilelistLine is the longest filelist line expand will read. bufio's
+// default of 64 KiB is within reach of a generated filelist or a long
+// +define+ list, and a longer line stopped the scan there, silently
+// dropping everything after it but for a log warning.
+const maxFilelistLine = 1 << 20
 
 // FilelistDiscoverer resolves the recursive filelist-of-filelists
 // structure rooted at Config.Filelists. It is symlink-aware:
@@ -47,10 +55,18 @@ func NewFilelistDiscoverer(root Root, cfg Config, warn func(string)) *FilelistDi
 	return &FilelistDiscoverer{root: root, cfg: cfg, warn: warn}
 }
 
+// Roots returns the single workspace root the discoverer was built for.
 func (d *FilelistDiscoverer) Roots(ctx context.Context) ([]Root, error) {
 	return []Root{d.root}, nil
 }
 
+// Files expands the configured filelists under root and returns every
+// source file they reach, deduplicated by resolved path. It also captures
+// the filelists visited and the +incdir+ and +define+ entries seen, for
+// VisitedFilelists, IncludeDirs and Defines.
+//
+// A cancelled ctx stops the walk between filelist lines and returns
+// ctx.Err(), leaving what the previous call captured in place.
 func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile, error) {
 	st := &discoveryState{
 		seenFilelists:   make(map[string]bool),
@@ -60,7 +76,10 @@ func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile
 	}
 
 	for _, rel := range d.cfg.Filelists {
-		d.expand(filepath.Join(root.Path, rel), st)
+		d.expand(ctx, filepath.Join(root.Path, rel), st)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
 	}
 
 	visited := make([]string, 0, len(st.seenFilelists))
@@ -81,7 +100,7 @@ func (d *FilelistDiscoverer) Files(ctx context.Context, root Root) ([]SourceFile
 func (d *FilelistDiscoverer) IncludeDirs() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return append([]string(nil), d.includeDirs...)
+	return slices.Clone(d.includeDirs)
 }
 
 // Defines returns the +define+ names (and, where given, values) captured
@@ -90,11 +109,7 @@ func (d *FilelistDiscoverer) IncludeDirs() []string {
 func (d *FilelistDiscoverer) Defines() map[string]string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	out := make(map[string]string, len(d.defines))
-	for k, v := range d.defines {
-		out[k] = v
-	}
-	return out
+	return maps.Clone(d.defines)
 }
 
 // discoveryState accumulates everything one Files() call discovers across
@@ -117,10 +132,13 @@ type discoveryState struct {
 func (d *FilelistDiscoverer) VisitedFilelists() []string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	return append([]string(nil), d.visited...)
+	return slices.Clone(d.visited)
 }
 
-func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
+func (d *FilelistDiscoverer) expand(ctx context.Context, path string, st *discoveryState) {
+	if ctx.Err() != nil {
+		return
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		d.warnf("could not resolve filelist %s: %s", path, err)
@@ -141,7 +159,11 @@ func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
 
 	dir := filepath.Dir(path)
 	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64<<10), maxFilelistLine)
 	for scanner.Scan() {
+		if ctx.Err() != nil {
+			return
+		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" || strings.HasPrefix(line, "#") || strings.HasPrefix(line, "//") {
 			continue
@@ -190,7 +212,7 @@ func (d *FilelistDiscoverer) expand(path string, st *discoveryState) {
 		}
 
 		if treatAsFilelist || filelistExtensions[strings.ToLower(filepath.Ext(entry))] {
-			d.expand(entry, st)
+			d.expand(ctx, entry, st)
 			continue
 		}
 
@@ -259,7 +281,7 @@ func plusArg(line, flag string) (string, bool) {
 // resolving a relative one against baseDir like every other filelist entry
 // and deduplicating across the whole recursive walk.
 func (d *FilelistDiscoverer) recordIncludeDirs(arg, baseDir string, st *discoveryState) {
-	for _, dir := range strings.Split(arg, "+") {
+	for dir := range strings.SplitSeq(arg, "+") {
 		if dir == "" {
 			continue
 		}
@@ -277,7 +299,7 @@ func (d *FilelistDiscoverer) recordIncludeDirs(arg, baseDir string, st *discover
 // recordDefines adds every '+'-separated NAME or NAME=VALUE in arg (VCS
 // allows "+define+FOO+BAR=1+BAZ" as well as one define per line) to st.
 func recordDefines(arg string, st *discoveryState) {
-	for _, def := range strings.Split(arg, "+") {
+	for def := range strings.SplitSeq(arg, "+") {
 		if def == "" {
 			continue
 		}

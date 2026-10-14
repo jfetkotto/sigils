@@ -14,13 +14,14 @@ import (
 	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
-// watchDebounce is how long watchFiles waits after the last file event
-// before acting on the accumulated batch. Many tools save via a temp file
-// plus rename (several events per save), and a filelist change triggers a
-// full workspace rebuild -- reacting per event would re-read files and
-// rebuild the workspace several times for one logical change. A var, not
-// a const, so tests can shorten it.
-var watchDebounce = 500 * time.Millisecond
+// defaultWatchDebounce is how long watchFiles waits after the last file
+// event before acting on the accumulated batch. Many tools save via a temp
+// file plus rename (several events per save), and a filelist change
+// triggers a full workspace rebuild -- reacting per event would re-read
+// files and rebuild the workspace several times for one logical change.
+// NewServer copies it into Server.watchDebounce, which a test can shorten
+// on its own instance without touching any other test's server.
+const defaultWatchDebounce = 500 * time.Millisecond
 
 // watchFiles watches the parent directories of every discovered source
 // file and filelist file for on-disk changes, keeping the index fresh for
@@ -35,7 +36,7 @@ var watchDebounce = 500 * time.Millisecond
 // should rebuild the index and call watchFiles again, since the file set
 // a changed filelist names may be different now. It returns false if ctx
 // was cancelled or the watcher couldn't be started at all. Events are
-// debounced (see watchDebounce): a burst of writes coalesces into one
+// debounced (see defaultWatchDebounce): a burst of writes coalesces into one
 // re-read per touched source file, or one rebuild if any filelist was
 // touched.
 //
@@ -49,7 +50,7 @@ var watchDebounce = 500 * time.Millisecond
 func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceFile, filelistPaths []string) bool {
 	watcher, err := fsnotify.NewWatcher()
 	if err != nil {
-		s.Log.Warningf("file watching: could not start: %s", err)
+		s.log.Warningf("file watching: could not start: %s", err)
 		return false
 	}
 	defer watcher.Close()
@@ -68,21 +69,24 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 	}
 	for dir := range dirs {
 		if err := watcher.Add(dir); err != nil {
-			s.Log.Warningf("file watching: could not watch %s: %s", dir, err)
+			s.log.Warningf("file watching: could not watch %s: %s", dir, err)
 		}
+	}
+	if s.watchArmed != nil {
+		s.watchArmed()
 	}
 
 	// Debounce state: nothing is acted on until the timer has been quiet
-	// for watchDebounce after the last relevant event. timerC stays nil
+	// for s.watchDebounce after the last relevant event. timerC stays nil
 	// (never selectable) until the first event arms the timer.
 	var timer *time.Timer
 	var timerC <-chan time.Time
 	armTimer := func() {
 		if timer == nil {
-			timer = time.NewTimer(watchDebounce)
+			timer = time.NewTimer(s.watchDebounce)
 			timerC = timer.C
 		} else {
-			timer.Reset(watchDebounce)
+			timer.Reset(s.watchDebounce)
 		}
 	}
 	defer func() {
@@ -121,7 +125,7 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 
 			if filelistSet[event.Name] {
 				if !rebuildPending {
-					s.Log.Infof("filelist %s changed on disk; rescanning the workspace shortly", event.Name)
+					s.log.Infof("filelist %s changed on disk; rescanning the workspace shortly", event.Name)
 				}
 				rebuildPending = true
 				armTimer()
@@ -139,19 +143,23 @@ func (s *Server) watchFiles(ctx context.Context, sourceFiles []workspace.SourceF
 			if rebuildPending {
 				return true
 			}
+			eventPaths := make([]string, 0, len(pending))
 			changed := make([]string, 0, len(pending))
 			for eventPath, logicalPath := range pending {
-				s.syncFromDisk(eventPath, logicalPath)
+				eventPaths = append(eventPaths, eventPath)
 				changed = append(changed, pathToURI(logicalPath))
 			}
+			forEachParallel(ctx, len(eventPaths), func(i int) {
+				s.syncFromDisk(eventPaths[i], pending[eventPaths[i]])
+			})
 			clear(pending)
-			s.cascadeReindexDependents(changed)
+			s.cascadeReindexDependents(ctx, changed)
 
 		case err, ok := <-watcher.Errors:
 			if !ok {
 				return false
 			}
-			s.Log.Warningf("file watching error: %s", err)
+			s.log.Warningf("file watching error: %s", err)
 		}
 	}
 }
@@ -173,12 +181,12 @@ func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		s.publishDiagnostics(s.index.RemoveFile(uri))
-		s.Log.Infof("dropped %s from the index (removed on disk)", logicalPath)
+		s.log.Infof("dropped %s from the index (removed on disk)", logicalPath)
 	case err != nil:
-		s.Log.Warningf("file watching: could not reread %s: %s", eventPath, err)
+		s.log.Warningf("file watching: could not reread %s: %s", eventPath, err)
 	default:
 		s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-		s.Log.Infof("reindexed %s after an on-disk change", logicalPath)
+		s.log.Infof("reindexed %s after an on-disk change", logicalPath)
 	}
 }
 
@@ -190,8 +198,8 @@ func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 // files' own next edit. Scoped to the on-disk/save path only (this is
 // watchFiles' own debounced tick), not live didChange keystrokes -- an
 // unsaved edit to a widely-included header doesn't synchronously re-scan
-// every dependent on every keystroke, a deliberate, documented tradeoff
-// (see the Phase 4 plan).
+// every dependent on every keystroke. That is a deliberate tradeoff: the
+// dependents catch up when the header is saved.
 //
 // One pass over each changed URI's own Dependents is enough, with no
 // further transitive cascade: sv.Index.Dependents(uri) already returns
@@ -200,20 +208,27 @@ func (s *Server) syncFromDisk(eventPath, logicalPath string) {
 // includes into the same resolver instance) -- so if Z includes X which
 // includes Y, Z's own last scan already recorded Y as a dependency too,
 // and Dependents(Y) already lists Z directly, not just X.
-func (s *Server) cascadeReindexDependents(changed []string) {
+//
+// The dependents are rescanned in parallel (see forEachParallel): a header
+// every module includes can have thousands of them, and this runs inside
+// watchFiles' event loop, so every other file event waits for it. ctx is
+// watchFiles' own, so Shutdown interrupts a long cascade too.
+func (s *Server) cascadeReindexDependents(ctx context.Context, changed []string) {
 	seen := make(map[string]bool, len(changed))
 	for _, uri := range changed {
 		seen[uri] = true
 	}
+	var deps []string
 	for _, uri := range changed {
 		for _, dep := range s.index.Dependents(uri) {
 			if seen[dep] {
 				continue
 			}
 			seen[dep] = true
-			s.reindexURI(dep)
+			deps = append(deps, dep)
 		}
 	}
+	forEachParallel(ctx, len(deps), func(i int) { s.reindexURI(deps[i]) })
 }
 
 // reindexURI re-scans uri -- from its open editor buffer if it has one,
@@ -229,7 +244,7 @@ func (s *Server) cascadeReindexDependents(changed []string) {
 // A no-op if uri isn't a resolvable file:// URI.
 func (s *Server) reindexURI(uri string) {
 	if s.scanOpenBuffer(uri) {
-		s.Log.Infof("reindexed open buffer %s after a dependency's on-disk change", uri)
+		s.log.Infof("reindexed open buffer %s after a dependency's on-disk change", uri)
 		return
 	}
 	path, err := uriToPath(uri)
@@ -238,9 +253,9 @@ func (s *Server) reindexURI(uri string) {
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		s.Log.Warningf("file watching: could not reread %s: %s", path, err)
+		s.log.Warningf("file watching: could not reread %s: %s", path, err)
 		return
 	}
 	s.publishDiagnostics(s.index.SetFile(uri, string(data)))
-	s.Log.Infof("reindexed %s after a dependency's on-disk change", path)
+	s.log.Infof("reindexed %s after a dependency's on-disk change", path)
 }

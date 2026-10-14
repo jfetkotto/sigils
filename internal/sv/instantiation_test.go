@@ -1,8 +1,11 @@
 package sv
 
 import (
+	"math/rand/v2"
 	"strings"
 	"testing"
+
+	svtoken "github.com/jfetkotto/svparse/token"
 )
 
 func TestInstantiationContextAtInsideEmptyParens(t *testing.T) {
@@ -247,5 +250,40 @@ func TestIncludePathInDistinguishesTwoDirectivesOnOneLine(t *testing.T) {
 	}
 	if path, _, ok := IncludePathIn(toks, 0, 28); !ok || path != "b.svh" {
 		t.Fatalf("second directive: path = %q, ok = %v", path, ok)
+	}
+}
+
+// innermostOpenParen walks backward from the cursor; it must agree with
+// the forward stack scan it replaced, which ignores a ")" with nothing
+// open, on any mix of parens.
+func TestInnermostOpenParenMatchesAForwardStackScan(t *testing.T) {
+	forward := func(toks []svtoken.Token) (int, bool) {
+		var open []int
+		for i, tok := range toks {
+			switch tok.Kind {
+			case svtoken.KindLParen:
+				open = append(open, i)
+			case svtoken.KindRParen:
+				if len(open) > 0 {
+					open = open[:len(open)-1]
+				}
+			}
+		}
+		if len(open) == 0 {
+			return 0, false
+		}
+		return open[len(open)-1], true
+	}
+	kinds := []svtoken.Kind{svtoken.KindLParen, svtoken.KindRParen, svtoken.KindIdent}
+	rng := rand.New(rand.NewPCG(3, 4))
+	for range 20000 {
+		toks := make([]svtoken.Token, rng.IntN(12))
+		for i := range toks {
+			toks[i].Kind = kinds[rng.IntN(len(kinds))]
+		}
+		wantIdx, wantOK := forward(toks)
+		if gotIdx, gotOK := innermostOpenParen(toks); gotIdx != wantIdx || gotOK != wantOK {
+			t.Fatalf("innermostOpenParen(%v) = (%d, %v), want (%d, %v)", toks, gotIdx, gotOK, wantIdx, wantOK)
+		}
 	}
 }

@@ -16,7 +16,7 @@ func TestWorkspaceSymbolCapsResults(t *testing.T) {
 	for i := range maxWorkspaceSymbols + 100 {
 		fmt.Fprintf(&b, "module mod_%04d;\nendmodule\n", i)
 	}
-	s.Index().SetFile("file:///many.sv", b.String())
+	s.index.SetFile("file:///many.sv", b.String())
 
 	results, err := s.WorkspaceSymbol(nil, &protocol.WorkspaceSymbolParams{Query: "mod_"})
 	if err != nil {
@@ -230,12 +230,12 @@ func TestDocumentSymbolKeepsIncludedDeclarationsAtTheHeadersOwnRoot(t *testing.T
 	// file's slice, which childIndex would drop and documentSymbolTree
 	// would never root.
 	s := newTestServer()
-	s.Index().SetIncludeResolverFactory(func() sv.IncludeResolver {
+	s.index.SetIncludeResolverFactory(func() sv.IncludeResolver {
 		return &mapResolver{files: map[string]string{
 			"cfg_defs.svh": "typedef struct { int fieldA; } t_header_cfg;\n",
 		}}
 	})
-	s.Index().SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
+	s.index.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
 
 	result, err := s.TextDocumentDocumentSymbol(nil, &protocol.DocumentSymbolParams{
 		TextDocument: protocol.TextDocumentIdentifier{URI: "file:///cfg_defs.svh"},
