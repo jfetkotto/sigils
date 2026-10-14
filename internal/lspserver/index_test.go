@@ -63,17 +63,17 @@ func TestRebuildIndexDropsFilesNoLongerDiscovered(t *testing.T) {
 	d := &fakeDiscoverer{files: []workspace.SourceFile{src(keepPath), src(dropPath)}}
 
 	_, prev := s.rebuildIndex(context.Background(), d, nil)
-	if _, ok := s.Index().Lookup("drop_mod"); !ok {
+	if _, ok := s.index.Lookup("drop_mod"); !ok {
 		t.Fatalf("expected drop_mod to be indexed after the first pass")
 	}
 
 	d.files = []workspace.SourceFile{src(keepPath)}
 	s.rebuildIndex(context.Background(), d, prev)
 
-	if _, ok := s.Index().Lookup("drop_mod"); ok {
+	if _, ok := s.index.Lookup("drop_mod"); ok {
 		t.Fatalf("expected drop_mod to be dropped once its file left the discovered set")
 	}
-	if _, ok := s.Index().Lookup("keep_mod"); !ok {
+	if _, ok := s.index.Lookup("keep_mod"); !ok {
 		t.Fatalf("expected keep_mod to remain indexed")
 	}
 }
@@ -99,7 +99,7 @@ func TestRemoveStaleFilesClearsDiagnosticsForDroppedFile(t *testing.T) {
 	d := &fakeDiscoverer{files: []workspace.SourceFile{src(keepPath), src(dropPath)}}
 
 	_, prev := s.rebuildIndex(context.Background(), d, nil)
-	if diags := s.Index().Diagnostics(pathToURI(dropPath)); len(diags) == 0 {
+	if diags := s.index.Diagnostics(pathToURI(dropPath)); len(diags) == 0 {
 		t.Fatalf("expected drop.sv's malformed content to produce a diagnostic after the first pass")
 	}
 
@@ -129,8 +129,8 @@ func TestBuildIndexIndexesNothingAfterContextCancellation(t *testing.T) {
 	cancel()
 	s.buildIndex(ctx, d)
 
-	if got := s.Index().FileCount(); got != 0 {
-		t.Fatalf("expected nothing indexed under a cancelled context, got %d file(s)", got)
+	if _, ok := s.index.Lookup("leaf"); ok {
+		t.Fatalf("expected nothing indexed under a cancelled context")
 	}
 }
 
@@ -150,7 +150,7 @@ func TestRebuildIndexKeepsDroppedFileWhileOpenInEditor(t *testing.T) {
 	d.files = nil
 	s.rebuildIndex(context.Background(), d, prev)
 
-	if _, ok := s.Index().Lookup("drop_mod"); !ok {
+	if _, ok := s.index.Lookup("drop_mod"); !ok {
 		t.Fatalf("expected drop_mod to survive the rebuild while its document is open (editor buffer stays authoritative)")
 	}
 }
@@ -168,7 +168,7 @@ func TestBuildIndexDoesNotOverwriteOpenBufferWithDiskContent(t *testing.T) {
 	// buffer text deliberately differs from what's on disk (an unsaved
 	// edit).
 	s.docs.Open(document.URI(uri), "systemverilog", 1, bufferText)
-	s.Index().SetFile(uri, bufferText)
+	s.index.SetFile(uri, bufferText)
 
 	d := &fakeDiscoverer{files: []workspace.SourceFile{
 		{LogicalPath: path, ResolvedPath: evalSymT(t, path)},
@@ -176,10 +176,10 @@ func TestBuildIndexDoesNotOverwriteOpenBufferWithDiskContent(t *testing.T) {
 
 	s.buildIndex(context.Background(), d)
 
-	if _, ok := s.Index().Lookup("buffer_only_ref"); !ok {
+	if _, ok := s.index.Lookup("buffer_only_ref"); !ok {
 		t.Fatalf("expected the open buffer's declaration to survive buildIndex")
 	}
-	if _, ok := s.Index().Lookup("disk_only_ref"); ok {
+	if _, ok := s.index.Lookup("disk_only_ref"); ok {
 		t.Fatalf("expected buildIndex to NOT overwrite the open buffer's index entry with on-disk content")
 	}
 }
@@ -204,7 +204,7 @@ func TestScanIncludeDiscoveredFilesDoesNotOverwriteOpenBufferOccurrences(t *test
 	defsURI := pathToURI(defsPath)
 	bufferText := "typedef logic [7:0] bus_t;\ntypedef logic [7:0] buffer_only_ref;\n"
 	s.docs.Open(document.URI(defsURI), "systemverilog", 1, bufferText)
-	s.Index().SetFile(defsURI, bufferText)
+	s.index.SetFile(defsURI, bufferText)
 
 	d := &fakeDiscoverer{files: []workspace.SourceFile{
 		{LogicalPath: topPath, ResolvedPath: evalSymT(t, topPath)},
@@ -212,10 +212,10 @@ func TestScanIncludeDiscoveredFilesDoesNotOverwriteOpenBufferOccurrences(t *test
 
 	s.rebuildIndex(context.Background(), d, nil)
 
-	if locs := s.Index().Occurrences("buffer_only_ref"); len(locs) == 0 {
+	if locs := s.index.Occurrences("buffer_only_ref"); len(locs) == 0 {
 		t.Fatalf("expected the open buffer's own occurrence data for defs.svh to survive the rebuild")
 	}
-	if locs := s.Index().Occurrences("disk_only_ref"); len(locs) != 0 {
+	if locs := s.index.Occurrences("disk_only_ref"); len(locs) != 0 {
 		t.Fatalf("expected the on-disk content to NOT overwrite the open buffer's occurrence data, got %+v", locs)
 	}
 }
@@ -235,9 +235,9 @@ func TestBuildIndexRescansOpenBufferWhenConfigChanges(t *testing.T) {
 	s := newTestServer()
 	uri := pathToURI(path)
 	s.docs.Open(document.URI(uri), "systemverilog", 1, bufferText)
-	s.Index().SetFile(uri, bufferText) // no SYNTHESIS defined yet, same as a real didOpen
+	s.index.SetFile(uri, bufferText) // no SYNTHESIS defined yet, same as a real didOpen
 
-	if _, ok := s.Index().Lookup("synth_only"); ok {
+	if _, ok := s.index.Lookup("synth_only"); ok {
 		t.Fatalf("expected synth_only to be undeclared before SYNTHESIS is defined")
 	}
 
@@ -247,7 +247,7 @@ func TestBuildIndexRescansOpenBufferWhenConfigChanges(t *testing.T) {
 	}
 	s.buildIndex(context.Background(), d)
 
-	if _, ok := s.Index().Lookup("synth_only"); !ok {
+	if _, ok := s.index.Lookup("synth_only"); !ok {
 		t.Fatalf("expected the open buffer to be rescanned with the new +define+SYNTHESIS, declaring synth_only")
 	}
 }
@@ -265,7 +265,7 @@ func TestBuildIndexWiresIncludeResolverFromFilelistProvider(t *testing.T) {
 
 	s.buildIndex(context.Background(), d)
 
-	if _, ok := s.Index().Lookup("bus_t"); !ok {
+	if _, ok := s.index.Lookup("bus_t"); !ok {
 		t.Fatalf("expected bus_t (from the `include) to be indexed once buildIndex wires a resolver")
 	}
 }
@@ -293,7 +293,7 @@ func TestBuildIndexWiresIncludeDirsFromFilelistProvider(t *testing.T) {
 
 	s.buildIndex(context.Background(), d)
 
-	if _, ok := s.Index().Lookup("bus_t"); !ok {
+	if _, ok := s.index.Lookup("bus_t"); !ok {
 		t.Fatalf("expected bus_t (resolved via +incdir+) to be indexed once buildIndex wires IncludeDirs")
 	}
 }
@@ -311,7 +311,7 @@ func TestBuildIndexWiresInitialMacrosFromFilelistProvider(t *testing.T) {
 
 	s.buildIndex(context.Background(), d)
 
-	if _, ok := s.Index().Lookup("synth_only"); !ok {
+	if _, ok := s.index.Lookup("synth_only"); !ok {
 		t.Fatalf("expected synth_only to be declared with the workspace's +define+SYNTHESIS wired in")
 	}
 }
@@ -351,7 +351,7 @@ func TestRebuildIndexScansFileDiscoveredOnlyViaInclude(t *testing.T) {
 	// as a side effect of scanning top.sv) is what populates its own
 	// occurrences -- confirm goto-def-style lookup finds it with a real
 	// declaration site.
-	locs, ok := s.Index().Lookup("bus_t")
+	locs, ok := s.index.Lookup("bus_t")
 	if !ok || len(locs) != 1 || locs[0].URI != defsURI {
 		t.Fatalf("Lookup(bus_t) = %+v, %v, want one location in %s", locs, ok, defsURI)
 	}
@@ -412,14 +412,14 @@ func TestRebuildIndexDropsIncludeDiscoveredFileOnceIncludeIsRemoved(t *testing.T
 	}}
 
 	_, prev := s.rebuildIndex(context.Background(), d, nil)
-	if _, ok := s.Index().Lookup("bus_t"); !ok {
+	if _, ok := s.index.Lookup("bus_t"); !ok {
 		t.Fatalf("expected bus_t to be indexed after the first pass")
 	}
 
 	writeFileT(t, topPath, "module top; endmodule\n")
 	s.rebuildIndex(context.Background(), d, prev)
 
-	if _, ok := s.Index().Lookup("bus_t"); ok {
+	if _, ok := s.index.Lookup("bus_t"); ok {
 		t.Fatalf("expected bus_t to be dropped once top.sv no longer includes defs.svh")
 	}
 }
@@ -454,10 +454,10 @@ func TestScanOpenBufferConvergesOnTheNewestText(t *testing.T) {
 		}
 	}
 
-	if _, ok := s.Index().Lookup("second_name"); !ok {
+	if _, ok := s.index.Lookup("second_name"); !ok {
 		t.Fatalf("index did not converge on the newest text")
 	}
-	if _, ok := s.Index().Lookup("first_name"); ok {
+	if _, ok := s.index.Lookup("first_name"); ok {
 		t.Fatalf("stale pre-edit declaration survived the scan")
 	}
 }

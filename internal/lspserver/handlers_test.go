@@ -38,6 +38,7 @@ func TestInitializeFindsWorkspaceRootAndConfig(t *testing.T) {
 		},
 	}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	result, err := s.Initialize(nil, params)
 	if err != nil {
 		t.Fatalf("Initialize: %v", err)
@@ -58,15 +59,15 @@ func TestInitializeFindsWorkspaceRootAndConfig(t *testing.T) {
 		t.Fatalf("expected OpenClose capability to be advertised")
 	}
 
-	gotRoot, _ := filepath.EvalSymlinks(s.Root())
+	gotRoot, _ := filepath.EvalSymlinks(s.root)
 	wantRoot, _ := filepath.EvalSymlinks(root)
 	if gotRoot != wantRoot {
-		t.Fatalf("Root() = %q, want %q", s.Root(), root)
+		t.Fatalf("Root() = %q, want %q", s.root, root)
 	}
-	if len(s.Config().Filelists) != 1 || s.Config().Filelists[0] != "products/Spu/SpuTO1/abc/top.f" {
-		t.Fatalf("unexpected config: %+v", s.Config())
+	if len(s.cfg.Filelists) != 1 || s.cfg.Filelists[0] != "products/Spu/SpuTO1/abc/top.f" {
+		t.Fatalf("unexpected config: %+v", s.cfg)
 	}
-	if s.Discoverer() == nil {
+	if s.discoverer == nil {
 		t.Fatalf("expected a discoverer to be set")
 	}
 }
@@ -78,11 +79,12 @@ func TestInitializeToleratesMissingWorkspaceRoot(t *testing.T) {
 		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: "file://" + dir}},
 	}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, params); err != nil {
 		t.Fatalf("Initialize should not fail when no workspace root is found: %v", err)
 	}
-	if s.Root() != "" {
-		t.Fatalf("expected empty root, got %q", s.Root())
+	if s.root != "" {
+		t.Fatalf("expected empty root, got %q", s.root)
 	}
 }
 
@@ -108,7 +110,7 @@ func TestDocumentLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DidOpen: %v", err)
 	}
-	if doc, ok := s.Documents().Get(document.URI(uri)); !ok || doc.Text != "module a; endmodule" {
+	if doc, ok := s.docs.Get(document.URI(uri)); !ok || doc.Text != "module a; endmodule" {
 		t.Fatalf("unexpected document after open: %+v, ok=%v", doc, ok)
 	}
 
@@ -122,7 +124,7 @@ func TestDocumentLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DidChange: %v", err)
 	}
-	doc, ok := s.Documents().Get(document.URI(uri))
+	doc, ok := s.docs.Get(document.URI(uri))
 	if !ok || doc.Version != 2 || doc.Text != "module a; initial begin end endmodule" {
 		t.Fatalf("unexpected document after change: %+v, ok=%v", doc, ok)
 	}
@@ -132,7 +134,7 @@ func TestDocumentLifecycle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DidClose: %v", err)
 	}
-	if _, ok := s.Documents().Get(document.URI(uri)); ok {
+	if _, ok := s.docs.Get(document.URI(uri)); ok {
 		t.Fatalf("expected document to be gone after close")
 	}
 }
@@ -161,7 +163,7 @@ func TestDidCloseRescansFromDiskDiscardingUnsavedEdits(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DidChange: %v", err)
 	}
-	if _, ok := s.Index().Lookup("buffer_only_ref"); !ok {
+	if _, ok := s.index.Lookup("buffer_only_ref"); !ok {
 		t.Fatalf("expected the unsaved edit to be indexed before close")
 	}
 
@@ -171,10 +173,10 @@ func TestDidCloseRescansFromDiskDiscardingUnsavedEdits(t *testing.T) {
 		t.Fatalf("DidClose: %v", err)
 	}
 
-	if _, ok := s.Index().Lookup("disk_only_ref"); !ok {
+	if _, ok := s.index.Lookup("disk_only_ref"); !ok {
 		t.Fatalf("expected the on-disk content to be indexed after close")
 	}
-	if _, ok := s.Index().Lookup("buffer_only_ref"); ok {
+	if _, ok := s.index.Lookup("buffer_only_ref"); ok {
 		t.Fatalf("expected the discarded unsaved edit to no longer be indexed after close")
 	}
 }
@@ -182,7 +184,7 @@ func TestDidCloseRescansFromDiskDiscardingUnsavedEdits(t *testing.T) {
 func TestDidChangeToleratesIncrementalShape(t *testing.T) {
 	s := newTestServer()
 	uri := "file:///a.sv"
-	s.Documents().Open(document.URI(uri), "systemverilog", 1, "old")
+	s.docs.Open(document.URI(uri), "systemverilog", 1, "old")
 
 	rangeVal := protocol.Range{}
 	err := s.TextDocumentDidChange(nil, &protocol.DidChangeTextDocumentParams{
@@ -195,7 +197,7 @@ func TestDidChangeToleratesIncrementalShape(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DidChange: %v", err)
 	}
-	doc, _ := s.Documents().Get(document.URI(uri))
+	doc, _ := s.docs.Get(document.URI(uri))
 	if doc.Text != "new" {
 		t.Fatalf("expected incremental change's Text to be used as the full replacement, got %q", doc.Text)
 	}
@@ -408,7 +410,7 @@ func TestTextDocumentDefinitionFollowsLiveEditsOverDisk(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("DidOpen: %v", err)
 	}
-	if _, ok := s.Index().Lookup("old_name"); !ok {
+	if _, ok := s.index.Lookup("old_name"); !ok {
 		t.Fatalf("expected old_name to be indexed after open")
 	}
 
@@ -423,10 +425,10 @@ func TestTextDocumentDefinitionFollowsLiveEditsOverDisk(t *testing.T) {
 		t.Fatalf("DidChange: %v", err)
 	}
 
-	if _, ok := s.Index().Lookup("old_name"); ok {
+	if _, ok := s.index.Lookup("old_name"); ok {
 		t.Fatalf("expected old_name to be gone from the index after the edit")
 	}
-	if _, ok := s.Index().Lookup("new_name"); !ok {
+	if _, ok := s.index.Lookup("new_name"); !ok {
 		t.Fatalf("expected new_name to be indexed after the edit")
 	}
 }
@@ -444,6 +446,7 @@ func TestInitializeWithFilelistConfigIndexesWorkspaceInBackground(t *testing.T) 
 	}
 
 	s := newTestServer()
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, &protocol.InitializeParams{
 		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: "file://" + root}},
 	}); err != nil {
@@ -452,7 +455,7 @@ func TestInitializeWithFilelistConfigIndexesWorkspaceInBackground(t *testing.T) 
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		if _, ok := s.Index().Lookup("leaf"); ok {
+		if _, ok := s.index.Lookup("leaf"); ok {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -681,6 +684,7 @@ func TestTextDocumentCompletionInsertTextFormat(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &params); err != nil {
 			t.Fatal(err)
 		}
+		t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 		if _, err := s.Initialize(nil, &params); err != nil {
 			t.Fatalf("Initialize: %v", err)
 		}
@@ -1117,6 +1121,7 @@ func TestTextDocumentCompletionStructMemberNoCallSnippetEvenWithSnippetSupport(t
 	if err := json.Unmarshal([]byte(raw), &params); err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, &params); err != nil {
 		t.Fatalf("Initialize: %v", err)
 	}
@@ -1225,12 +1230,12 @@ func TestTextDocumentCompletionSuggestsStructMembersForIncludedPackageType(t *te
 	// body, so its Declaration lives in the header's bucket with no
 	// Parent link back to the package.
 	s := newTestServer()
-	s.Index().SetIncludeResolverFactory(func() sv.IncludeResolver {
+	s.index.SetIncludeResolverFactory(func() sv.IncludeResolver {
 		return &mapResolver{files: map[string]string{
 			"cfg_defs.svh": "  typedef struct packed { logic [7:0] unique_field; logic flag; } t_header_cfg;\n",
 		}}
 	})
-	s.Index().SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
+	s.index.SetFile("file:///pkg_cfg.sv", "package pkg_cfg;\n  `include \"cfg_defs.svh\"\nendpackage\n")
 
 	uri := "file:///a.sv"
 	src := "module top;\n  pkg_cfg::t_header_cfg cfg;\n  cfg.\nendmodule\n"
@@ -1417,7 +1422,7 @@ func TestNonFileDocumentsStayOutOfTheIndex(t *testing.T) {
 			s := newTestServer()
 			openDoc(t, s, uri, "module ghost_module;\nendmodule\n")
 
-			if _, ok := s.Index().Lookup("ghost_module"); ok {
+			if _, ok := s.index.Lookup("ghost_module"); ok {
 				t.Fatalf("%s was indexed", uri)
 			}
 			// It must still be readable, so hover and completion work.
@@ -1431,7 +1436,7 @@ func TestNonFileDocumentsStayOutOfTheIndex(t *testing.T) {
 func TestFileDocumentsAreStillIndexed(t *testing.T) {
 	s := newTestServer()
 	openDoc(t, s, "file:///top.sv", "module real_module;\nendmodule\n")
-	if _, ok := s.Index().Lookup("real_module"); !ok {
+	if _, ok := s.index.Lookup("real_module"); !ok {
 		t.Fatalf("a file:// document should be indexed")
 	}
 }
@@ -1447,6 +1452,7 @@ func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
 		WorkspaceFolders: []protocol.WorkspaceFolder{{URI: protocol.DocumentUri("file://" + root), Name: "root"}},
 	}
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, params); err != nil {
 		t.Fatal(err)
 	}
@@ -1461,6 +1467,7 @@ func TestSecondInitializeCancelsTheFirstIndexingPass(t *testing.T) {
 	s.mu.Unlock()
 	defer realFirst()
 
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
 	if _, err := s.Initialize(nil, params); err != nil {
 		t.Fatal(err)
 	}
@@ -1587,5 +1594,18 @@ func TestTextDocumentDefinitionFallsThroughWhenReceiverIsNotAStruct(t *testing.T
 	locs := definitionAt(t, s, "file:///top.sv", 2, 16)
 	if len(locs) != 1 || locs[0].URI != "file:///leaf.sv" {
 		t.Fatalf("named port connection should still resolve to the port: %+v", locs)
+	}
+}
+
+func TestInitializeReportsTheBuildVersion(t *testing.T) {
+	s := newTestServer()
+	t.Cleanup(func() { _ = s.Shutdown(nil) }) // stop the background indexer and watcher
+	result, err := s.Initialize(nil, &protocol.InitializeParams{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info := result.(protocol.InitializeResult).ServerInfo
+	if info == nil || info.Name != ServerName || info.Version == nil || *info.Version != serverVersion() || *info.Version == "" {
+		t.Fatalf("serverInfo = %+v, want name %q and version %q", info, ServerName, serverVersion())
 	}
 }

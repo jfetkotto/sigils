@@ -179,7 +179,7 @@ func TestScanDeclarationsTypedefAliasCapturesUnderlyingType(t *testing.T) {
 	src := "typedef logic [7:0] byte_t;\n"
 	decls := ScanDeclarations("test.sv", src)
 	byteT := findDecl(t, decls, "byte_t")
-	if byteT.TypedefKind != "alias" || byteT.AliasType != "logic [7:0]" {
+	if byteT.TypedefKind() != "alias" || byteT.AliasType() != "logic [7:0]" {
 		t.Fatalf("unexpected byte_t: %+v", byteT)
 	}
 }
@@ -204,12 +204,12 @@ func TestScanDeclarationsTypedefStructCapturesFields(t *testing.T) {
 `
 	decls := ScanDeclarations("test.sv", src)
 	pktT := findDecl(t, decls, "pkt_t")
-	if pktT.TypedefKind != "struct" || !pktT.Packed {
+	if pktT.TypedefKind() != "struct" || !pktT.Packed() {
 		t.Fatalf("unexpected pkt_t: %+v", pktT)
 	}
-	if len(pktT.Fields) != 2 || pktT.Fields[0].Name != "data" || pktT.Fields[0].Detail != "logic [7:0]" ||
-		pktT.Fields[1].Name != "valid" || pktT.Fields[1].Detail != "logic" {
-		t.Fatalf("unexpected fields: %+v", pktT.Fields)
+	if len(pktT.Fields()) != 2 || pktT.Fields()[0].Name != "data" || pktT.Fields()[0].Detail != "logic [7:0]" ||
+		pktT.Fields()[1].Name != "valid" || pktT.Fields()[1].Detail != "logic" {
+		t.Fatalf("unexpected fields: %+v", pktT.Fields())
 	}
 }
 
@@ -221,11 +221,11 @@ func TestScanDeclarationsTypedefUnionCapturesFields(t *testing.T) {
 `
 	decls := ScanDeclarations("test.sv", src)
 	rawT := findDecl(t, decls, "raw_t")
-	if rawT.TypedefKind != "union" || !rawT.Packed {
+	if rawT.TypedefKind() != "union" || !rawT.Packed() {
 		t.Fatalf("unexpected raw_t: %+v", rawT)
 	}
-	if len(rawT.Fields) != 2 || rawT.Fields[0].Name != "word" || rawT.Fields[1].Name != "bytes" {
-		t.Fatalf("unexpected fields: %+v", rawT.Fields)
+	if len(rawT.Fields()) != 2 || rawT.Fields()[0].Name != "word" || rawT.Fields()[1].Name != "bytes" {
+		t.Fatalf("unexpected fields: %+v", rawT.Fields())
 	}
 }
 
@@ -241,7 +241,7 @@ func TestScanDeclarationsTypedefForwardDeclarationHasNoTypedefKind(t *testing.T)
 	src := "typedef class my_future_class;\n"
 	decls := ScanDeclarations("test.sv", src)
 	d := findDecl(t, decls, "my_future_class")
-	if d.TypedefKind != "" {
+	if d.TypedefKind() != "" {
 		t.Fatalf("expected no TypedefKind for a forward declaration, got %+v", d)
 	}
 }
@@ -385,7 +385,7 @@ func TestScanDeclarationsExtractsAnsiPortList(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	got := portNames(leaf.Ports)
+	got := portNames(leaf.Ports())
 	want := []string{"clk", "rst_n", "data"}
 	if len(got) != len(want) {
 		t.Fatalf("ports = %v, want %v", got, want)
@@ -395,8 +395,8 @@ func TestScanDeclarationsExtractsAnsiPortList(t *testing.T) {
 			t.Fatalf("ports = %v, want %v", got, want)
 		}
 	}
-	if leaf.Ports[2].Detail != "output logic [7:0]" {
-		t.Fatalf("data port detail = %q, want \"output logic [7:0]\"", leaf.Ports[2].Detail)
+	if leaf.Ports()[2].Detail != "output logic [7:0]" {
+		t.Fatalf("data port detail = %q, want \"output logic [7:0]\"", leaf.Ports()[2].Detail)
 	}
 }
 
@@ -433,11 +433,11 @@ func TestScanDeclarationsContainerParamsExcludesLocalParams(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	if len(leaf.Params) != 1 || leaf.Params[0].Name != "WIDTH" {
-		t.Fatalf("expected only WIDTH in Params (FIXED is a localparam), got %+v", leaf.Params)
+	if len(leaf.Params()) != 1 || leaf.Params()[0].Name != "WIDTH" {
+		t.Fatalf("expected only WIDTH in Params (FIXED is a localparam), got %+v", leaf.Params())
 	}
-	if leaf.Params[0].Detail != "int = 8" {
-		t.Fatalf("WIDTH detail = %q, want \"int = 8\"", leaf.Params[0].Detail)
+	if leaf.Params()[0].Detail != "int = 8" {
+		t.Fatalf("WIDTH detail = %q, want \"int = 8\"", leaf.Params()[0].Detail)
 	}
 }
 
@@ -446,11 +446,11 @@ func TestScanDeclarationsParamPortEntryCreatesIndividualDeclaration(t *testing.T
 	decls := ScanDeclarations("test.sv", src)
 
 	width := findDecl(t, decls, "WIDTH")
-	if width.Kind != KindParameter || width.Detail != "int" || width.Default != "8" {
+	if width.Kind != KindParameter || width.Detail != "int" || width.Default() != "8" {
 		t.Fatalf("unexpected WIDTH: %+v", width)
 	}
 	fixed := findDecl(t, decls, "FIXED")
-	if fixed.Kind != KindParameter || fixed.Detail != "int" || fixed.Default != "1" {
+	if fixed.Kind != KindParameter || fixed.Detail != "int" || fixed.Default() != "1" {
 		t.Fatalf("unexpected FIXED: %+v", fixed)
 	}
 	if fixed.Parent != width.Parent {
@@ -463,7 +463,7 @@ func TestScanDeclarationsBodyLevelParameterHasDetailAndDefault(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 
 	width := findDecl(t, decls, "WIDTH")
-	if width.Kind != KindParameter || width.Detail != "int" || width.Default != "8" {
+	if width.Kind != KindParameter || width.Detail != "int" || width.Default() != "8" {
 		t.Fatalf("unexpected WIDTH: %+v", width)
 	}
 }
@@ -476,7 +476,7 @@ func TestScanDeclarationsPortListWithDefaultValue(t *testing.T) {
 	// The based-literal "1'b0" tokenizes its "b0" as an identifier-looking
 	// run; scanning must stop at "=" so that doesn't get mistaken for the
 	// port name.
-	if got := portNames(leaf.Ports); len(got) != 2 || got[0] != "rst_n" || got[1] != "clk" {
+	if got := portNames(leaf.Ports()); len(got) != 2 || got[0] != "rst_n" || got[1] != "clk" {
 		t.Fatalf("ports = %v, want [rst_n clk]", got)
 	}
 }
@@ -486,7 +486,7 @@ func TestScanDeclarationsPortListSkipsParameterList(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	if got := portNames(leaf.Ports); len(got) != 2 || got[0] != "data" || got[1] != "clk" {
+	if got := portNames(leaf.Ports()); len(got) != 2 || got[0] != "data" || got[1] != "clk" {
 		t.Fatalf("ports = %v, want [data clk] (the #(...) parameter list must not be mistaken for the port list)", got)
 	}
 }
@@ -496,7 +496,7 @@ func TestScanDeclarationsPortListSharedDirection(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
 
-	if got := portNames(leaf.Ports); len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
+	if got := portNames(leaf.Ports()); len(got) != 3 || got[0] != "a" || got[1] != "b" || got[2] != "c" {
 		t.Fatalf("ports = %v, want [a b c]", got)
 	}
 }
@@ -505,8 +505,8 @@ func TestScanDeclarationsNoPortListYieldsNilPorts(t *testing.T) {
 	src := "module leaf;\nendmodule\n"
 	decls := ScanDeclarations("test.sv", src)
 	leaf := findDecl(t, decls, "leaf")
-	if leaf.Ports != nil {
-		t.Fatalf("expected nil ports for a module with no port list, got %+v", leaf.Ports)
+	if leaf.Ports() != nil {
+		t.Fatalf("expected nil ports for a module with no port list, got %+v", leaf.Ports())
 	}
 }
 
@@ -514,8 +514,8 @@ func TestScanDeclarationsClassIsNotGivenPorts(t *testing.T) {
 	src := "class foo;\nendclass\n"
 	decls := ScanDeclarations("test.sv", src)
 	foo := findDecl(t, decls, "foo")
-	if foo.Ports != nil {
-		t.Fatalf("expected class declarations to never get a Ports list, got %+v", foo.Ports)
+	if foo.Ports() != nil {
+		t.Fatalf("expected class declarations to never get a Ports list, got %+v", foo.Ports())
 	}
 }
 
@@ -588,17 +588,17 @@ func TestScanDeclarationsTypedefEnumComputesImplicitValues(t *testing.T) {
 
 	enStates := findDecl(t, decls, "en_States")
 	want := []string{"S_FOO = 0", "S_BAR = 1", "S_BAZ = 2"}
-	if len(enStates.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers, want)
+	if len(enStates.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers(), want)
 	}
 	for i := range want {
-		if enStates.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers, want)
+		if enStates.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", enStates.EnumMembers(), want)
 		}
 	}
 
 	sBar := findDecl(t, decls, "S_BAR")
-	if sBar.Value != "1" || sBar.EnumTypedef != "en_States" {
+	if sBar.Value() != "1" || sBar.EnumTypedef() != "en_States" {
 		t.Fatalf("unexpected S_BAR: %+v", sBar)
 	}
 }
@@ -608,12 +608,12 @@ func TestScanDeclarationsTypedefEnumRespectsExplicitValueThenContinuesIncrementi
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
 	want := []string{"A = 0", "B = 5", "C = 6"}
-	if len(tDecl.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+	if len(tDecl.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
 	for i := range want {
-		if tDecl.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+		if tDecl.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 		}
 	}
 }
@@ -623,12 +623,12 @@ func TestScanDeclarationsTypedefEnumHandlesMultipleExplicitValues(t *testing.T) 
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
 	want := []string{"FOO = 0", "BAR = 1", "BAZ = 10", "QUX = 11"}
-	if len(tDecl.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+	if len(tDecl.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
 	for i := range want {
-		if tDecl.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+		if tDecl.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 		}
 	}
 }
@@ -638,16 +638,16 @@ func TestScanDeclarationsTypedefEnumStopsComputingAfterNonLiteralValue(t *testin
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
 	want := []string{"A = WIDTH-1", "B"}
-	if len(tDecl.EnumMembers) != len(want) {
-		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+	if len(tDecl.EnumMembers()) != len(want) {
+		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
 	for i := range want {
-		if tDecl.EnumMembers[i] != want[i] {
-			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers, want)
+		if tDecl.EnumMembers()[i] != want[i] {
+			t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 		}
 	}
 	b := findDecl(t, decls, "B")
-	if b.Value != "" {
+	if b.Value() != "" {
 		t.Fatalf("expected B's value to be left uncomputed after a non-literal prior value, got %+v", b)
 	}
 }
@@ -696,7 +696,8 @@ func TestScanDeclarationsEnumWithNoBraceDoesNotPanic(t *testing.T) {
 
 func TestScanReturnsDeclarationsAndOccurrences(t *testing.T) {
 	text := "module top;\n  leaf u_leaf ();\nendmodule\n"
-	decls, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+	res := Scan("test.sv", text, nil, nil)
+	decls, occs := res.Decls, res.Occurrences
 
 	wantDecls := ScanDeclarations("test.sv", text)
 	got := decls["test.sv"]
@@ -715,7 +716,7 @@ func TestScanReturnsDeclarationsAndOccurrences(t *testing.T) {
 
 func TestOccurrencesFromTokensInternsRepeatedNames(t *testing.T) {
 	text := "module top;\n  wire clk;\n  wire clk2;\n  assign clk2 = clk;\nendmodule\n"
-	_, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+	occs := Scan("test.sv", text, nil, nil).Occurrences
 
 	var seen []string
 	for _, o := range occs {
@@ -737,7 +738,7 @@ func TestOccurrencesTrackSystemTasksWithDollarPrefix(t *testing.T) {
 	// task/function as one KindSystemIdent token including the '$' --
 	// occurrence tracking should record it whole, not split it.
 	text := `module top; initial $display("hi"); endmodule`
-	_, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+	occs := Scan("test.sv", text, nil, nil).Occurrences
 	for _, o := range occs {
 		if o.Name == "$display" {
 			return
@@ -827,11 +828,11 @@ func TestScanDeclarationsFunctionArgs(t *testing.T) {
 	decls := ScanDeclarations("test.sv", src)
 
 	add := findDecl(t, decls, "add")
-	if len(add.Args) != 2 || add.Args[0].Name != "a" || add.Args[1].Name != "b" {
-		t.Fatalf("unexpected add.Args: %+v", add.Args)
+	if len(add.Args()) != 2 || add.Args()[0].Name != "a" || add.Args()[1].Name != "b" {
+		t.Fatalf("unexpected add.Args(): %+v", add.Args())
 	}
-	if add.Args[0].Detail != "int" {
-		t.Fatalf("unexpected arg detail: %q", add.Args[0].Detail)
+	if add.Args()[0].Detail != "int" {
+		t.Fatalf("unexpected arg detail: %q", add.Args()[0].Detail)
 	}
 }
 
@@ -863,7 +864,7 @@ func TestScanAttributesIncludedDeclarationsToTheirOwnFile(t *testing.T) {
 		"defs.svh": "typedef logic [7:0] bus_t;\n",
 	}}
 	src := "`include \"defs.svh\"\nmodule top;\n  bus_t data;\nendmodule\n"
-	decls, _, _, _, _, _ := Scan("file:///top.sv", src, resolver, nil)
+	decls := Scan("file:///top.sv", src, resolver, nil).Decls
 
 	if len(decls["file:///defs.svh"]) != 1 || decls["file:///defs.svh"][0].Name != "bus_t" {
 		t.Fatalf("expected bus_t attributed to defs.svh, got %+v", decls["file:///defs.svh"])
@@ -880,7 +881,7 @@ func TestScanAttributesIncludedDeclarationsToTheirOwnFile(t *testing.T) {
 
 func TestScanNilResolverLeavesIncludeUnresolvedWithoutCrashing(t *testing.T) {
 	src := "`include \"defs.svh\"\nmodule top; endmodule\n"
-	decls, _, _, _, _, _ := Scan("file:///top.sv", src, nil, nil)
+	decls := Scan("file:///top.sv", src, nil, nil).Decls
 	if len(decls["file:///top.sv"]) != 1 || decls["file:///top.sv"][0].Name != "top" {
 		t.Fatalf("expected recovery to still find top, got %+v", decls)
 	}
@@ -888,7 +889,7 @@ func TestScanNilResolverLeavesIncludeUnresolvedWithoutCrashing(t *testing.T) {
 
 func TestScanInitialMacrosGateIfdef(t *testing.T) {
 	src := "`ifdef SYNTHESIS\nmodule synth_only; endmodule\n`else\nmodule sim_only; endmodule\n`endif\n"
-	decls, _, _, _, _, _ := Scan("test.sv", src, nil, map[string]string{"SYNTHESIS": ""})
+	decls := Scan("test.sv", src, nil, map[string]string{"SYNTHESIS": ""}).Decls
 	if _, ok := findDeclMap(decls["test.sv"], "synth_only"); !ok {
 		t.Fatalf("expected synth_only to be declared with SYNTHESIS defined, got %+v", decls["test.sv"])
 	}
@@ -911,7 +912,7 @@ func TestScanCleanInputSeedsAnEmptyDiagnosticsEntry(t *testing.T) {
 	// not merely absent -- that's what lets a caller notice "this file
 	// used to have errors and now has none" and republish an empty
 	// diagnostics list to clear them client-side.
-	_, _, diags, _, _, _ := Scan("test.sv", "module top; endmodule", nil, nil)
+	diags := Scan("test.sv", "module top; endmodule", nil, nil).Diagnostics
 	list, ok := diags["test.sv"]
 	if !ok {
 		t.Fatalf("expected test.sv to be a key in diags even with no errors")
@@ -923,7 +924,7 @@ func TestScanCleanInputSeedsAnEmptyDiagnosticsEntry(t *testing.T) {
 
 func TestScanRecordsDiagnosticForUnresolvedInclude(t *testing.T) {
 	src := "`include \"defs.svh\"\nmodule top; endmodule\n"
-	_, _, diags, _, _, _ := Scan("test.sv", src, nil, nil)
+	diags := Scan("test.sv", src, nil, nil).Diagnostics
 	list := diags["test.sv"]
 	if len(list) != 1 {
 		t.Fatalf("expected one diagnostic for the unresolved `include, got %+v", list)
@@ -936,7 +937,7 @@ func TestScanRecordsDiagnosticForUnresolvedInclude(t *testing.T) {
 func TestScanRecordsDiagnosticForUnrecognizedDeclaration(t *testing.T) {
 	// A bare number can't start any declaration the parser recognizes --
 	// a genuine syntax problem, not just a preprocessing one.
-	_, _, diags, _, _, _ := Scan("test.sv", "42;\nmodule top; endmodule\n", nil, nil)
+	diags := Scan("test.sv", "42;\nmodule top; endmodule\n", nil, nil).Diagnostics
 	if len(diags["test.sv"]) == 0 {
 		t.Fatalf("expected at least one parser diagnostic for the bare '42;'")
 	}
@@ -947,7 +948,7 @@ func TestScanAttributesDiagnosticsToTheirOwnIncludedFile(t *testing.T) {
 		"defs.svh": "42;\n", // malformed on purpose
 	}}
 	src := "`include \"defs.svh\"\nmodule top; endmodule\n"
-	_, _, diags, _, _, _ := Scan("file:///top.sv", src, resolver, nil)
+	diags := Scan("file:///top.sv", src, resolver, nil).Diagnostics
 
 	if len(diags["file:///defs.svh"]) == 0 {
 		t.Fatalf("expected defs.svh's own malformed content to produce a diagnostic attributed to defs.svh, got %+v", diags)
@@ -1035,7 +1036,7 @@ func TestScanConstructsPreviouslyReportedSpuriousDiagnostics(t *testing.T) {
 
 	for name, src := range cases {
 		t.Run(name, func(t *testing.T) {
-			_, _, diags, _, _, _ := Scan("test.sv", src, nil, nil)
+			diags := Scan("test.sv", src, nil, nil).Diagnostics
 			if list := diags["test.sv"]; len(list) != 0 {
 				t.Fatalf("expected zero diagnostics, got %+v", list)
 			}
@@ -1073,7 +1074,7 @@ func TestIsKeyword(t *testing.T) {
 
 func TestScanCollectsWildcardImportAtFileScope(t *testing.T) {
 	src := "import pa_pkg::*;\nmodule top;\nendmodule\n"
-	_, _, _, imports, _, _ := Scan("test.sv", src, nil, nil)
+	imports := Scan("test.sv", src, nil, nil).imports
 	imps := imports["test.sv"]
 	if len(imps) != 1 {
 		t.Fatalf("expected 1 import, got %+v", imps)
@@ -1085,7 +1086,7 @@ func TestScanCollectsWildcardImportAtFileScope(t *testing.T) {
 
 func TestScanCollectsSpecificMemberImport(t *testing.T) {
 	src := "import pa_pkg::foo;\nmodule top;\nendmodule\n"
-	_, _, _, imports, _, _ := Scan("test.sv", src, nil, nil)
+	imports := Scan("test.sv", src, nil, nil).imports
 	imps := imports["test.sv"]
 	if len(imps) != 1 {
 		t.Fatalf("expected 1 import, got %+v", imps)
@@ -1100,7 +1101,8 @@ func TestScanCollectsImportParentedToEnclosingModule(t *testing.T) {
   import pa_pkg::*;
 endmodule
 `
-	decls, _, _, imports, _, _ := Scan("test.sv", src, nil, nil)
+	res := Scan("test.sv", src, nil, nil)
+	decls, imports := res.Decls, res.imports
 	top := findDecl(t, decls["test.sv"], "top")
 	topIdx := -1
 	for i, d := range decls["test.sv"] {
@@ -1122,7 +1124,8 @@ endmodule
 
 func TestScanCollectsModuleHeaderImportSameAsBodyImport(t *testing.T) {
 	src := "module top import pa_pkg::*; (input logic clk);\nendmodule\n"
-	decls, _, _, imports, _, _ := Scan("test.sv", src, nil, nil)
+	res := Scan("test.sv", src, nil, nil)
+	decls, imports := res.Decls, res.imports
 	topIdx := -1
 	for i, d := range decls["test.sv"] {
 		if d.Name == "top" {
@@ -1143,7 +1146,7 @@ func TestScanCollectsModuleHeaderImportSameAsBodyImport(t *testing.T) {
 
 func TestScanCollectsNamedPortConnectionSite(t *testing.T) {
 	src := "module top;\n  leaf u_leaf(.clk(sig));\nendmodule\n"
-	_, _, _, _, connections, _ := Scan("test.sv", src, nil, nil)
+	connections := Scan("test.sv", src, nil, nil).connections
 	conns := connections["test.sv"]
 	if len(conns) != 1 {
 		t.Fatalf("expected 1 connection, got %+v", conns)
@@ -1155,7 +1158,7 @@ func TestScanCollectsNamedPortConnectionSite(t *testing.T) {
 
 func TestScanCollectsImplicitPortConnectionSite(t *testing.T) {
 	src := "module top;\n  leaf u_leaf(.clk);\nendmodule\n"
-	_, _, _, _, connections, _ := Scan("test.sv", src, nil, nil)
+	connections := Scan("test.sv", src, nil, nil).connections
 	conns := connections["test.sv"]
 	if len(conns) != 1 || conns[0].ModuleType != "leaf" || conns[0].Name != "clk" || conns[0].Character != 15 {
 		t.Fatalf("unexpected connection: %+v", conns)
@@ -1164,7 +1167,7 @@ func TestScanCollectsImplicitPortConnectionSite(t *testing.T) {
 
 func TestScanSkipsWildcardConnectionSite(t *testing.T) {
 	src := "module top;\n  leaf u_leaf(.*);\nendmodule\n"
-	_, _, _, _, connections, _ := Scan("test.sv", src, nil, nil)
+	connections := Scan("test.sv", src, nil, nil).connections
 	if conns := connections["test.sv"]; len(conns) != 0 {
 		t.Fatalf("expected no connections for a wildcard \".*\", got %+v", conns)
 	}
@@ -1172,7 +1175,7 @@ func TestScanSkipsWildcardConnectionSite(t *testing.T) {
 
 func TestScanCollectsNamedParamOverrideSite(t *testing.T) {
 	src := "module top;\n  leaf #(.WIDTH(8)) u0();\nendmodule\n"
-	_, _, _, _, connections, _ := Scan("test.sv", src, nil, nil)
+	connections := Scan("test.sv", src, nil, nil).connections
 	conns := connections["test.sv"]
 	if len(conns) != 1 {
 		t.Fatalf("expected 1 connection, got %+v", conns)
@@ -1184,7 +1187,7 @@ func TestScanCollectsNamedParamOverrideSite(t *testing.T) {
 
 func TestScanSkipsPositionalConnectionsAndOverrides(t *testing.T) {
 	src := "module top;\n  leaf #(8) u0(sig);\nendmodule\n"
-	_, _, _, _, connections, _ := Scan("test.sv", src, nil, nil)
+	connections := Scan("test.sv", src, nil, nil).connections
 	if conns := connections["test.sv"]; len(conns) != 0 {
 		t.Fatalf("expected no connections for positional entries, got %+v", conns)
 	}
@@ -1232,7 +1235,7 @@ func TestOccurrencesRecordDotReceiver(t *testing.T) {
 	// Recorded off token adjacency, so whitespace around the dot is
 	// immaterial -- unlike DotReceiverAt, which works on raw line text.
 	text := "module top;\n  assign a = st_bundle.ckSideband;\n  assign b = spaced . field;\n  logic bare;\nendmodule\n"
-	_, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+	occs := Scan("test.sv", text, nil, nil).Occurrences
 
 	recv := make(map[string]string)
 	for _, o := range occs {
@@ -1257,7 +1260,7 @@ func TestOccurrencesRecordNoReceiverForNamedPortConnection(t *testing.T) {
 	// look like a field access -- connection sites have their own scoping
 	// path (see connectionSite).
 	text := "module top;\n  leaf u_leaf (.clk(sig));\nendmodule\n"
-	_, occs, _, _, _, _ := Scan("test.sv", text, nil, nil)
+	occs := Scan("test.sv", text, nil, nil).Occurrences
 	for _, o := range occs {
 		if o.Name == "clk" && o.Receiver != "" {
 			t.Fatalf("named port connection recorded receiver %q, want none", o.Receiver)

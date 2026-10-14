@@ -26,28 +26,35 @@ import (
 	svtoken "github.com/jfetkotto/svparse/token"
 )
 
-type Kind string
+// Kind is what sort of construct a Declaration is. The zero value is no
+// kind at all; String gives the SystemVerilog-ish name hover text shows.
+type Kind uint8
 
 const (
-	KindModule     Kind = "module"
-	KindInterface  Kind = "interface"
-	KindProgram    Kind = "program"
-	KindClass      Kind = "class"
-	KindPackage    Kind = "package"
-	KindFunction   Kind = "function"
-	KindTask       Kind = "task"
-	KindTypedef    Kind = "typedef"
-	KindEnumMember Kind = "enum_member"
+	KindModule Kind = iota + 1
+	KindInterface
+	KindProgram
+	KindClass
+	KindPackage
+	KindFunction
+	KindTask
+	KindTypedef
+	KindEnumMember
 
 	// KindPort, KindVariable, and KindParameter are leaf declarations --
 	// never containers, never globally referenceable by bare name (see
-	// containerKinds/GloballyReferenceableKinds below). Each is parented to
+	// isContainerKind/IsGloballyReferenceable below). Each is parented to
 	// its enclosing container like any other declaration, which is what
 	// makes it resolvable via the existing scope-chain walk in index.go
 	// with no changes to that resolution logic itself.
-	KindPort      Kind = "port"
-	KindVariable  Kind = "variable"
-	KindParameter Kind = "parameter"
+	KindPort
+	KindVariable
+	KindParameter
+
+	// KindArgument is a function/task's ANSI-style argument, parented to
+	// its subprogram, so it resolves inside the body by the same
+	// scope-chain walk and shadows same-named outer declarations there.
+	KindArgument
 
 	// KindModport is a leaf too, but unlike KindPort/KindVariable/
 	// KindParameter it's never resolvable via the ordinary scope-chain
@@ -55,33 +62,67 @@ const (
 	// child, via Index.FindModport/ModportInfo (mirroring
 	// FindInstantiationPort's "resolve the container by name, then look
 	// up its child" shape for a named-port connection).
-	KindModport Kind = "modport"
+	KindModport
 )
 
-// ContainerKinds are the declaration kinds that can hold other
-// declarations and so participate in the container stack / scope chain.
-var containerKinds = map[Kind]bool{
-	KindModule:    true,
-	KindInterface: true,
-	KindProgram:   true,
-	KindClass:     true,
-	KindPackage:   true,
-	KindFunction:  true,
-	KindTask:      true,
+var kindNames = [...]string{
+	KindModule:     "module",
+	KindInterface:  "interface",
+	KindProgram:    "program",
+	KindClass:      "class",
+	KindPackage:    "package",
+	KindFunction:   "function",
+	KindTask:       "task",
+	KindTypedef:    "typedef",
+	KindEnumMember: "enum_member",
+	KindPort:       "port",
+	KindVariable:   "variable",
+	KindParameter:  "parameter",
+	KindArgument:   "argument",
+	KindModport:    "modport",
 }
 
-// GloballyReferenceableKinds are kinds realistically referenceable by bare
-// name from anywhere in the workspace without a package/class qualifier.
-// Bare functions/tasks/typedefs need a qualifier or module-local
-// visibility, so they're deliberately excluded from unqualified,
-// out-of-scope global fallback -- see Index.FindDefinition.
-var GloballyReferenceableKinds = map[Kind]bool{
-	KindModule:    true,
-	KindInterface: true,
-	KindProgram:   true,
-	KindClass:     true,
-	KindPackage:   true,
+// String returns the kind's name as hover text shows it, e.g. "module".
+func (k Kind) String() string {
+	if int(k) < len(kindNames) {
+		return kindNames[k]
+	}
+	return "Kind(" + strconv.Itoa(int(k)) + ")"
 }
+
+// isContainerKind reports whether k can hold other declarations and so
+// participates in the container stack / scope chain.
+func isContainerKind(k Kind) bool {
+	switch k {
+	case KindModule, KindInterface, KindProgram, KindClass, KindPackage, KindFunction, KindTask:
+		return true
+	}
+	return false
+}
+
+// IsGloballyReferenceable reports whether k is realistically referenceable
+// by bare name from anywhere in the workspace without a package/class
+// qualifier. Bare functions/tasks/typedefs need a qualifier or
+// module-local visibility, so they're deliberately excluded from
+// unqualified, out-of-scope global fallback -- see Index.FindDefinition.
+func IsGloballyReferenceable(k Kind) bool {
+	switch k {
+	case KindModule, KindInterface, KindProgram, KindClass, KindPackage:
+		return true
+	}
+	return false
+}
+
+// TypedefKind is what a typedef's underlying type is -- see
+// Declaration.TypedefKind.
+type TypedefKind string
+
+const (
+	TypedefAlias  TypedefKind = "alias"
+	TypedefEnum   TypedefKind = "enum"
+	TypedefStruct TypedefKind = "struct"
+	TypedefUnion  TypedefKind = "union"
+)
 
 // Declaration is a named construct found while scanning a source file.
 // Parent is an index into the same []Declaration slice within the same
@@ -89,8 +130,23 @@ var GloballyReferenceableKinds = map[Kind]bool{
 // scope -- including the first declaration on the far side of an
 // `include boundary, whose lexical parent lives in a different file (see
 // declarationsFromAST).
+//
+// Only what most declarations carry is stored inline. Everything specific
+// to one kind (a container's port list, a function's arguments, a
+// typedef's body, an enum member's value, a parameter's default) sits in
+// a separate per-kind struct reached through ext and read through the
+// accessor methods below, which return the zero value for any other kind.
+// The bulk of a real workspace's declarations are ports and variables,
+// which have no such data at all, and every declaration used to carry
+// room for all of it: 352 bytes each, copied in every loop over a file's
+// declarations.
 type Declaration struct {
-	Kind         Kind
+	Kind Kind
+	// Prototype is true for a function/task declared with no body ("extern
+	// function ...;", "virtual"/"pure virtual function ...;", or a DPI
+	// import). It's what distinguishes goto-declaration from
+	// goto-definition for those; everything else has no such split.
+	Prototype    bool
 	Name         string
 	Line         int // zero-based, matching LSP Position
 	Character    int // zero-based, start of Name
@@ -98,97 +154,19 @@ type Declaration struct {
 	EndCharacter int
 	Parent       int
 
-	// Prototype is true for a function/task declared with no body ("extern
-	// function ...;", "virtual"/"pure virtual function ...;", or a DPI
-	// import). It's what distinguishes goto-declaration from
-	// goto-definition for those; everything else has no such split.
-	Prototype bool
-
-	// Ports holds the ANSI port list for a module/interface/program
-	// declaration (nil for everything else, and for a container with no
-	// port list at all). Used for named-port-connection completion at an
-	// instantiation site. Each port is also separately recorded as its own
-	// KindPort Declaration parented to this one, so referencing a port by
-	// name inside the module body resolves too.
-	Ports []Port
-
-	// Params holds the OVERRIDABLE entries of a module/interface/program's
-	// "#( ... )" parameter port list (nil for everything else) -- used for
-	// parameter-override completion at an instantiation site, the "#(...)"
-	// counterpart to Ports/named-port-connection completion. A "localparam"
-	// entry is deliberately excluded here (per the LRM it can never be
-	// overridden via ".name(value)", so suggesting one would be actively
-	// misleading), even though it -- like every entry -- still gets its
-	// own individual KindParameter Declaration below, parented to this
-	// one, the same way every port does.
-	Params []Port
-
-	// ReturnType holds a function's return type, pre-formatted via
-	// formatType (e.g. "int", "void", "logic [7:0]") -- empty for a
-	// function with an implicit (unspecified) return type, and for every
-	// other Kind, including KindTask (tasks have no return type in SV, so
-	// there's nothing for the *ast.Task case to source this from).
-	ReturnType string
-
-	// Args holds the argument list for a function/task declaration (nil
-	// for everything else). Reuses Port's Name/Detail shape rather than a
-	// near-duplicate type -- a function argument and a port entry have the
-	// identical shape (a name plus a direction/type detail string).
-	Args []Port
-
-	// TypedefKind distinguishes what a KindTypedef declaration's
-	// Underlying actually is, so hover can render each shape correctly.
-	// "" means no recognized underlying type (a forward declaration, e.g.
-	// "typedef class Foo;" or a bare "typedef Foo;").
-	TypedefKind string // "alias" | "enum" | "struct" | "union" | ""
-
-	// AliasType holds the rendered aliased type for a plain alias typedef
-	// ("typedef logic [7:0] byte_t;" -> "logic [7:0]"). Set only when
-	// TypedefKind == "alias".
-	AliasType string
-
-	// BaseType holds an enum typedef's optional base type ("typedef enum
-	// int {...} t;" -> "int"), "" if unwritten. EnumMembers holds each
-	// member rendered as "NAME" or "NAME = value" (the value either as
-	// written, or -- per LRM 6.19 -- computed when none was written and
-	// the auto-increment chain is still known, see enumMemberTexts). Both
-	// set only when TypedefKind == "enum".
-	BaseType    string
-	EnumMembers []string
-
-	// Packed and Fields describe a struct/union typedef's body. Fields
-	// reuses Port's Name/Detail shape -- a struct/union field and a port
-	// share the identical name+type shape. Set only when TypedefKind ==
-	// "struct" or "union".
-	Packed bool
-	Fields []Port
-
-	// Value holds an enum member's resolved value (Kind == KindEnumMember
-	// only): the literal expression as written, or -- when none was
-	// written and the auto-increment chain since the last known integer
-	// value is still intact -- the computed LRM 6.19 default. "" when it
-	// can't be safely computed (a non-integer-literal explicit value
-	// breaks the chain for subsequent unlabeled members).
-	Value string
-
-	// EnumTypedef holds the enclosing enum typedef's name (Kind ==
-	// KindEnumMember only), for hover context.
-	EnumTypedef string
-
-	// TypeName holds a port's or variable's declared type's bare name
-	// (Kind == KindPort or KindVariable only; "" otherwise) -- e.g.
-	// "logic" for a plain net, or "ty_bundle" for a struct/union typedef
-	// reference. It's what backs struct-member completion after
-	// "receiver.": Index.StructFields looks TypeName up against the
-	// workspace's typedefs, and a name that turns out to be a builtin
-	// keyword (like "logic") or a non-struct/union typedef is expected to
-	// simply fail to match there -- no special-casing of builtins is
-	// needed here, this is populated unconditionally from ast.Type.Name.
-	// KindParameter isn't covered even though a struct-typed parameter is
-	// possible in principle ("parameter my_struct_t P = ...") --
-	// convertParams never fed this, following Detail's own precedent of
-	// treating parameters separately; left as follow-on work if that gap
-	// turns out to matter in practice.
+	// TypeName holds a port's, variable's or argument's declared type's
+	// bare name ("" otherwise) -- e.g. "logic" for a plain net, or
+	// "ty_bundle" for a struct/union typedef reference. It's what backs
+	// struct-member completion after "receiver.": Index.StructFields looks
+	// TypeName up against the workspace's typedefs, and a name that turns
+	// out to be a builtin keyword (like "logic") or a non-struct/union
+	// typedef is expected to simply fail to match there -- no
+	// special-casing of builtins is needed here, this is populated
+	// unconditionally from ast.Type.Name. KindParameter isn't covered even
+	// though a struct-typed parameter is possible in principle ("parameter
+	// my_struct_t P = ...") -- convertParams never fed this, following
+	// Detail's own precedent of treating parameters separately; left as
+	// follow-on work if that gap turns out to matter in practice.
 	TypeName string
 
 	// Detail holds a human-readable rendering of this declaration's type
@@ -198,20 +176,16 @@ type Declaration struct {
 	// the type, e.g. "logic [7:0]" or "pkg_types::bus_t" -- formatType's
 	// rendering of TypeName, since a plain variable has no direction to
 	// prefix; Kind == KindParameter: just the type, e.g. "int", "" if
-	// untyped -- see Default below for the piece portEntry-style
-	// rendering can't fold in) -- attached to the declaration's own
-	// individual entry (not just its container's list) so hovering it,
-	// wherever it's referenced, has something to show.
+	// untyped -- see Default for the piece portEntry-style rendering can't
+	// fold in) -- attached to the declaration's own individual entry (not
+	// just its container's list) so hovering it, wherever it's referenced,
+	// has something to show.
 	Detail string
 
-	// Default holds a parameter's default value as written (Kind ==
-	// KindParameter only), "" if none. Kept separate from Detail (rather
-	// than combined the way Port.Detail/portDetail combines direction and
-	// type) because a parameter's default comes AFTER its name in real SV
-	// declaration order ("parameter int WIDTH = 8"), unlike a port's
-	// direction+type prefix -- see hover's dedicated parameterText,
-	// which is why portEntry can't be reused here.
-	Default string
+	// ext is one of *containerExt, *subprogramExt, *typedefExt,
+	// *enumMemberExt or *parameterExt, or nil when the declaration has no
+	// kind-specific data. See declaration.go.
+	ext any
 }
 
 // Port is one entry from a module/interface/program's ANSI port list, or a
@@ -267,8 +241,8 @@ type connectionSite struct {
 // Scan returns text's declarations -- bucketed by the file each one
 // actually belongs to, see declarationsFromAST -- every identifier
 // occurrence in it, and every preprocessing/parsing error recorded along
-// the way, also bucketed by file. Index.SetFile uses this to populate all
-// three.
+// the way, also bucketed by file (see ScanResult). Index.SetFile uses this
+// to populate all three.
 //
 // Declarations and occurrences deliberately come from different token
 // streams. Occurrences (references/rename/documentHighlight) come from
@@ -289,16 +263,39 @@ type connectionSite struct {
 // workspace.FilelistDiscoverer.Defines), so a company-wide flag can gate
 // an `ifdef the same way an in-source `define would. Pass nil where none
 // apply.
-func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]string) (decls map[string][]Declaration, occurrences []Occurrence, diags map[string][]Diagnostic, imports map[string][]importDecl, connections map[string][]connectionSite, links []memberLink) {
+func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]string) ScanResult {
 	lexToks, _ := lexer.Lex(text) // lex errors don't block occurrence collection -- best-effort on malformed/mid-edit text
-	occurrences = occurrencesFromSVParseTokens(lexToks)
+	res := ScanResult{Occurrences: occurrencesFromSVParseTokens(lexToks)}
 
 	ppToks, ppErrs := preprocessor.PreprocessWithOptions(uri, text, resolver, preprocessor.Options{InitialMacros: initialMacros})
 	f, parseErrs := parser.Parse(uri, ppToks)
 
-	diags = diagnosticsByFile(uri, ppErrs, parseErrs)
-	decls, imports, connections, links = declarationsFromAST(f)
-	return decls, occurrences, diags, imports, connections, links
+	res.Diagnostics = diagnosticsByFile(uri, ppErrs, parseErrs)
+	res.Decls, res.imports, res.connections, res.links = declarationsFromAST(f)
+	return res
+}
+
+// ScanResult is everything one Scan call produces. Every map is keyed by
+// the URI each entry belongs to, which for anything reached through an
+// `include is the included file rather than the one scanned.
+type ScanResult struct {
+	// Decls holds each file's declarations, with Parent indices scoped to
+	// that file's own slice -- see declarationsFromAST.
+	Decls map[string][]Declaration
+	// Occurrences holds every identifier token in the scanned file itself,
+	// from its raw, unexpanded text.
+	Occurrences []Occurrence
+	// Diagnostics holds each file's preprocessing and parsing errors,
+	// always with an entry (possibly empty) for the scanned file.
+	Diagnostics map[string][]Diagnostic
+
+	// imports, connections and links are the side channels only Index
+	// consumes: import statements (see importDecl), named instantiation
+	// connections (see connectionSite) and cross-`include container
+	// membership (see memberLink).
+	imports     map[string][]importDecl
+	connections map[string][]connectionSite
+	links       []memberLink
 }
 
 // Diagnostic is a single preprocessing or parsing problem svparse
@@ -334,8 +331,7 @@ func diagnosticsByFile(uri string, ppErrs []preprocessor.Error, parseErrs []pars
 // only want one file's own declarations and don't need cross-file include
 // resolution or initial macros -- mainly tests.
 func ScanDeclarations(uri, text string) []Declaration {
-	decls, _, _, _, _, _ := Scan(uri, text, nil, nil)
-	return decls[uri]
+	return Scan(uri, text, nil, nil).Decls[uri]
 }
 
 // declarationsFromAST walks f's declarations and buckets them by the URI
@@ -446,8 +442,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent,
-			Ports:  convertPorts(n.Ports),
-			Params: convertParams(n.Params),
+			ext:    newContainerExt(convertPorts(n.Ports), convertParams(n.Params)),
 		})
 		for _, port := range n.Ports {
 			appendDecl(buckets, uri, Declaration{
@@ -464,9 +459,9 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 				Kind: KindParameter, Name: param.Name,
 				Line: param.Line, Character: param.Character,
 				EndLine: param.Line, EndCharacter: param.Character + UTF16Len(param.Name),
-				Parent:  idx,
-				Detail:  formatType(param.Type),
-				Default: joinTokenText(param.Default),
+				Parent: idx,
+				Detail: formatType(param.Type),
+				ext:    newParameterExt(joinTokenText(param.Default)),
 			})
 		}
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
@@ -490,23 +485,24 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
 
 	case *ast.Function:
-		appendDecl(buckets, uri, Declaration{
+		idx := appendDecl(buckets, uri, Declaration{
 			Kind: KindFunction, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent, Prototype: n.Prototype,
-			ReturnType: formatType(n.ReturnType),
-			Args:       convertArgs(n.Args),
+			ext: newSubprogramExt(formatType(n.ReturnType), convertArgs(n.Args)),
 		})
+		appendArgDecls(buckets, uri, idx, n.Prototype, n.Args)
 
 	case *ast.Task:
-		appendDecl(buckets, uri, Declaration{
+		idx := appendDecl(buckets, uri, Declaration{
 			Kind: KindTask, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.EndLine, EndCharacter: n.EndCharacter,
 			Parent: parent, Prototype: n.Prototype,
-			Args: convertArgs(n.Args),
+			ext: newSubprogramExt("", convertArgs(n.Args)),
 		})
+		appendArgDecls(buckets, uri, idx, n.Prototype, n.Args)
 
 	case *ast.Typedef:
 		// Enum members are recorded parented to the typedef's OWN parent,
@@ -529,9 +525,8 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 					Kind: KindEnumMember, Name: m.Name,
 					Line: m.Line, Character: m.Character,
 					EndLine: m.Line, EndCharacter: m.Character + UTF16Len(m.Name),
-					Parent:      parent,
-					Value:       enumValues[i],
-					EnumTypedef: n.Name,
+					Parent: parent,
+					ext:    &enumMemberExt{value: enumValues[i], enumTypedef: n.Name},
 				})
 			}
 		}
@@ -543,13 +538,13 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		}
 		switch u := n.Underlying.(type) {
 		case *ast.TypeAlias:
-			td.TypedefKind, td.AliasType = "alias", formatType(u.Type)
+			td.ext = &typedefExt{kind: TypedefAlias, aliasType: formatType(u.Type)}
 		case *ast.Enum:
-			td.TypedefKind, td.BaseType, td.EnumMembers = "enum", formatType(u.BaseType), enumLabels
+			td.ext = &typedefExt{kind: TypedefEnum, baseType: formatType(u.BaseType), enumMembers: enumLabels}
 		case *ast.Struct:
-			td.TypedefKind, td.Packed, td.Fields = "struct", u.Packed, structUnionFields(u.Members)
+			td.ext = &typedefExt{kind: TypedefStruct, packed: u.Packed, fields: structUnionFields(u.Members)}
 		case *ast.Union:
-			td.TypedefKind, td.Packed, td.Fields = "union", u.Packed, structUnionFields(u.Members)
+			td.ext = &typedefExt{kind: TypedefUnion, packed: u.Packed, fields: structUnionFields(u.Members)}
 		}
 		appendDecl(buckets, uri, td)
 
@@ -568,9 +563,9 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			Kind: KindParameter, Name: n.Name,
 			Line: n.Line, Character: n.Character,
 			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
-			Parent:  parent,
-			Detail:  formatType(n.Type),
-			Default: joinTokenText(n.Default),
+			Parent: parent,
+			Detail: formatType(n.Type),
+			ext:    newParameterExt(joinTokenText(n.Default)),
 		})
 
 	case *ast.Modport:
@@ -647,6 +642,30 @@ func convertPorts(ports []ast.Port) []Port {
 		out[i] = Port{Name: p.Name, Detail: portDetail(p.Direction, p.Type)}
 	}
 	return out
+}
+
+// appendArgDecls records each of a function/task's arguments as its own
+// KindArgument Declaration parented to the subprogram at idx. A
+// prototype's arguments are skipped: its span ends at its name, so they
+// would sit outside their own parent, and nothing in a prototype can
+// refer to them anyway.
+func appendArgDecls(buckets map[string][]Declaration, uri string, idx int, prototype bool, args []ast.Arg) {
+	if prototype {
+		return
+	}
+	for _, a := range args {
+		if a.Name == "" {
+			continue
+		}
+		appendDecl(buckets, uri, Declaration{
+			Kind: KindArgument, Name: a.Name,
+			Line: a.Line, Character: a.Character,
+			EndLine: a.Line, EndCharacter: a.Character + UTF16Len(a.Name),
+			Parent:   idx,
+			Detail:   portDetail(a.Direction, a.Type),
+			TypeName: a.Type.Name,
+		})
+	}
 }
 
 func convertArgs(args []ast.Arg) []Port {
@@ -852,22 +871,33 @@ func occurrencesFromSVParseTokens(toks []svtoken.Token) []Occurrence {
 		if i >= 2 && toks[i-1].Kind == svtoken.KindDot && toks[i-2].Kind == svtoken.KindIdent {
 			occ.Receiver = intern(toks[i-2].Text)
 		}
+		// Occurrence.NamedArg: "(.name(" or ", .name(".
+		if i >= 2 && i+1 < len(toks) && toks[i-1].Kind == svtoken.KindDot &&
+			(toks[i-2].Kind == svtoken.KindLParen || toks[i-2].Kind == svtoken.KindComma) &&
+			toks[i+1].Kind == svtoken.KindLParen {
+			occ.NamedArg = true
+		}
+		// Occurrence.Qualifier: "pkg::name" records "pkg" the same way.
+		// "$unit::name" lexes "$unit" as a system identifier and is
+		// recorded too, so it is never mistaken for a bare use.
+		if i >= 2 && toks[i-1].Kind == svtoken.KindColonColon &&
+			(toks[i-2].Kind == svtoken.KindIdent || toks[i-2].Kind == svtoken.KindSystemIdent) {
+			occ.Qualifier = intern(toks[i-2].Text)
+		}
 		out = append(out, occ)
 	}
 	return out
 }
 
-// isIdentStart/isIdentChar defer to svparse/token rather than defining a
-// rule of their own. They used to use unicode.IsLetter/IsDigit, a looser
-// approximation than the ASCII-only production svparse's lexer actually
-// implements (LRM Annex A: [a-zA-Z_][a-zA-Z0-9_$]*), and the two disagreeing
-// is not a cosmetic difference: these predicates decide what word the cursor
-// sits on and, via IsIdentifier, whether a rename target is writable, so
-// accepting a name the lexer will reject means renaming a symbol into text
-// that no longer tokenizes -- the symbol then can't be found again and the
-// file grows a diagnostic where the rename landed.
-func isIdentStart(r rune) bool { return svtoken.IsIdentStart(r) }
-
+// isIdentChar defers to svparse/token rather than defining a rule of its
+// own. It used to use unicode.IsLetter/IsDigit, a looser approximation than
+// the ASCII-only production svparse's lexer actually implements (LRM Annex
+// A: [a-zA-Z_][a-zA-Z0-9_$]*), and the two disagreeing is not a cosmetic
+// difference: it decides what word the cursor sits on, and
+// svtoken.IsIdentifier (see IsIdentifier) whether a rename target is
+// writable, so accepting a name the lexer will reject means renaming a
+// symbol into text that no longer tokenizes -- the symbol then can't be
+// found again and the file grows a diagnostic where the rename landed.
 func isIdentChar(r rune) bool { return svtoken.IsIdentChar(r) }
 
 // IsIdentifier reports whether name is spelled as a valid SV identifier and

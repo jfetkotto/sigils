@@ -19,11 +19,7 @@ import (
 // Guard wraps a request handler, turning a panic into an error return.
 func Guard[P, R any](log commonlog.Logger, f func(*glsp.Context, P) (R, error)) func(*glsp.Context, P) (R, error) {
 	return func(ctx *glsp.Context, params P) (result R, err error) {
-		defer func() {
-			if v := recover(); v != nil {
-				err = logPanic(log, v)
-			}
-		}()
+		defer recoverInto(log, &err)
 		return f(ctx, params)
 	}
 }
@@ -32,11 +28,7 @@ func Guard[P, R any](log commonlog.Logger, f func(*glsp.Context, P) (R, error)) 
 // error.
 func GuardNotify[P any](log commonlog.Logger, f func(*glsp.Context, P) error) func(*glsp.Context, P) error {
 	return func(ctx *glsp.Context, params P) (err error) {
-		defer func() {
-			if v := recover(); v != nil {
-				err = logPanic(log, v)
-			}
-		}()
+		defer recoverInto(log, &err)
 		return f(ctx, params)
 	}
 }
@@ -44,16 +36,18 @@ func GuardNotify[P any](log commonlog.Logger, f func(*glsp.Context, P) error) fu
 // GuardShutdown is Guard for the parameterless Shutdown handler.
 func GuardShutdown(log commonlog.Logger, f func(*glsp.Context) error) func(*glsp.Context) error {
 	return func(ctx *glsp.Context) (err error) {
-		defer func() {
-			if v := recover(); v != nil {
-				err = logPanic(log, v)
-			}
-		}()
+		defer recoverInto(log, &err)
 		return f(ctx)
 	}
 }
 
-func logPanic(log commonlog.Logger, v any) error {
-	log.Errorf("handler panic: %v\n%s", v, debug.Stack())
-	return fmt.Errorf("internal error: %v", v)
+// recoverInto, deferred directly by a handler wrapper, turns a panic in
+// that handler into a logged error stored in *err. It must be the deferred
+// call itself: recover only stops a panic when called from the deferred
+// function, not from something that function calls.
+func recoverInto(log commonlog.Logger, err *error) {
+	if v := recover(); v != nil {
+		log.Errorf("handler panic: %v\n%s", v, debug.Stack())
+		*err = fmt.Errorf("internal error: %v", v)
+	}
 }

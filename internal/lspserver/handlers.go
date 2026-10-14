@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"runtime/debug"
 	"strings"
 
 	"github.com/tliron/glsp"
@@ -14,9 +15,23 @@ import (
 	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
-const serverName = "sigils"
-const serverVersion = "0.0.1"
+// ServerName is the name sigils reports to the client and logs under.
+const ServerName = "sigils"
 
+// serverVersion is the module version this binary was built from, as the
+// Go toolchain recorded it: the release tag for "go install ...@vX.Y.Z",
+// "(devel)" for a build from a local checkout.
+func serverVersion() string {
+	if info, ok := debug.ReadBuildInfo(); ok && info.Main.Version != "" {
+		return info.Main.Version
+	}
+	return "(devel)"
+}
+
+// Initialize finds the workspace root and its configuration, starts
+// indexing and file watching in the background, and reports the server's
+// capabilities.
+//
 // glspCtx (not "context" -- shadowing the stdlib context package used
 // below for the background indexing goroutine) carries Notify, captured
 // once via setNotify so publishDiagnostics can push
@@ -31,20 +46,20 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 
 	root, err := workspace.FindRoot(initializeSearchStart(params))
 	if err != nil {
-		s.Log.Warningf("could not locate workspace root: %s; continuing without one", err)
+		s.log.Warningf("could not locate workspace root: %s; continuing without one", err)
 		root = ""
 	}
 
 	var cfg workspace.Config
 	if root != "" {
 		if cfg, err = workspace.LoadConfig(root); err != nil {
-			s.Log.Warningf("failed to load %s: %s", workspace.ConfigFileName, err)
+			s.log.Warningf("failed to load %s: %s", workspace.ConfigFileName, err)
 		}
 	}
 
 	var discoverer workspace.Discoverer
 	if root != "" && len(cfg.Filelists) > 0 {
-		discoverer = workspace.NewFilelistDiscoverer(workspace.Root{Path: root}, cfg, func(msg string) { s.Log.Warning(msg) })
+		discoverer = workspace.NewFilelistDiscoverer(workspace.Root{Path: root}, cfg, func(msg string) { s.log.Warning(msg) })
 	} else {
 		discoverer = workspace.NewStaticDiscoverer(workspaceRoots(params))
 	}
@@ -65,7 +80,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 	s.snippetSupport = clientSupportsSnippets(params)
 	s.mu.Unlock()
 	if prevCancel != nil {
-		s.Log.Warning("initialize received again; cancelling the previous indexing pass")
+		s.log.Warning("initialize received again; cancelling the previous indexing pass")
 		prevCancel()
 	}
 
@@ -77,7 +92,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 
 	openClose := true
 	change := protocol.TextDocumentSyncKindFull
-	version := serverVersion
+	version := serverVersion()
 
 	return protocol.InitializeResult{
 		Capabilities: protocol.ServerCapabilities{
@@ -99,7 +114,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 			RenameProvider:            true,
 		},
 		ServerInfo: &protocol.InitializeResultServerInfo{
-			Name:    serverName,
+			Name:    ServerName,
 			Version: &version,
 		},
 	}, nil
@@ -118,12 +133,16 @@ func clientSupportsSnippets(params *protocol.InitializeParams) bool {
 	return support != nil && *support
 }
 
-func (s *Server) Initialized(context *glsp.Context, params *protocol.InitializedParams) error {
-	s.Log.Info("initialized")
+// Initialized handles the client's initialized notification. There is
+// nothing left to do by then: Initialize already started indexing.
+func (s *Server) Initialized(_ *glsp.Context, params *protocol.InitializedParams) error {
+	s.log.Info("initialized")
 	return nil
 }
 
-func (s *Server) Shutdown(context *glsp.Context) error {
+// Shutdown records that shutdown was requested (see ShutdownReceived) and
+// stops the background indexer and file watcher.
+func (s *Server) Shutdown(_ *glsp.Context) error {
 	s.mu.Lock()
 	s.shutdownReceived = true
 	cancel := s.watchCancel
@@ -131,16 +150,20 @@ func (s *Server) Shutdown(context *glsp.Context) error {
 	if cancel != nil {
 		cancel()
 	}
-	s.Log.Info("shutdown requested")
+	s.log.Info("shutdown requested")
 	return nil
 }
 
-func (s *Server) SetTrace(context *glsp.Context, params *protocol.SetTraceParams) error {
+// SetTrace applies the client's $/setTrace level to glsp's protocol
+// tracing.
+func (s *Server) SetTrace(_ *glsp.Context, params *protocol.SetTraceParams) error {
 	protocol.SetTraceValue(params.Value)
 	return nil
 }
 
-func (s *Server) TextDocumentDidOpen(context *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
+// TextDocumentDidOpen stores the opened buffer and, for a file:// URI,
+// indexes its text in place of whatever was scanned from disk.
+func (s *Server) TextDocumentDidOpen(_ *glsp.Context, params *protocol.DidOpenTextDocumentParams) error {
 	doc := params.TextDocument
 	s.docs.Open(document.URI(doc.URI), doc.LanguageID, doc.Version, doc.Text)
 	// The document store takes anything the client opens, so hover and
@@ -149,11 +172,12 @@ func (s *Server) TextDocumentDidOpen(context *glsp.Context, params *protocol.Did
 	if isFileURI(doc.URI) {
 		s.publishDiagnostics(s.index.SetFile(doc.URI, doc.Text))
 	}
-	s.Log.Infof("opened %s", doc.URI)
+	s.log.Infof("opened %s", doc.URI)
 	return nil
 }
 
-func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.DidChangeTextDocumentParams) error {
+// TextDocumentDidChange replaces an open buffer's text and reindexes it.
+func (s *Server) TextDocumentDidChange(_ *glsp.Context, params *protocol.DidChangeTextDocumentParams) error {
 	if len(params.ContentChanges) == 0 {
 		return nil
 	}
@@ -167,14 +191,14 @@ func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.D
 	case protocol.TextDocumentContentChangeEventWhole:
 		text = change.Text
 	case protocol.TextDocumentContentChangeEvent:
-		s.Log.Warningf("received an incremental change for %s despite advertising full-document sync; using its text as the full replacement", params.TextDocument.URI)
+		s.log.Warningf("received an incremental change for %s despite advertising full-document sync; using its text as the full replacement", params.TextDocument.URI)
 		text = change.Text
 	default:
 		return fmt.Errorf("unrecognized content change type %T", change)
 	}
 
 	if !s.docs.ApplyFullChange(document.URI(params.TextDocument.URI), params.TextDocument.Version, text) {
-		s.Log.Warningf("didChange for unknown document %s", params.TextDocument.URI)
+		s.log.Warningf("didChange for unknown document %s", params.TextDocument.URI)
 	}
 	if isFileURI(string(params.TextDocument.URI)) {
 		s.publishDiagnostics(s.index.SetFile(string(params.TextDocument.URI), text))
@@ -182,10 +206,13 @@ func (s *Server) TextDocumentDidChange(context *glsp.Context, params *protocol.D
 	return nil
 }
 
-func (s *Server) TextDocumentDidClose(context *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
+// TextDocumentDidClose forgets a closed buffer and reindexes the file from
+// disk, since the buffer may have held unsaved edits.
+func (s *Server) TextDocumentDidClose(_ *glsp.Context, params *protocol.DidCloseTextDocumentParams) error {
 	uri := params.TextDocument.URI
 	s.docs.Close(document.URI(uri))
-	s.Log.Infof("closed %s", uri)
+	s.forgetTokens(uri)
+	s.log.Infof("closed %s", uri)
 
 	// Deliberately not removing the file from s.index: it still exists on
 	// disk, and other files' goto-definition results should keep resolving
@@ -215,7 +242,7 @@ func (s *Server) TextDocumentDidClose(context *glsp.Context, params *protocol.Di
 // resolution, not full LRM-compliant elaboration. It prefers a real body
 // over an extern/pure-virtual/DPI-import prototype when both are known for
 // the same name -- see sv.Index.FindDefinition.
-func (s *Server) TextDocumentDefinition(context *glsp.Context, params *protocol.DefinitionParams) (any, error) {
+func (s *Server) TextDocumentDefinition(_ *glsp.Context, params *protocol.DefinitionParams) (any, error) {
 	return s.resolveWordAt(params.TextDocument.URI, params.Position, s.index.FindDefinition)
 }
 
@@ -225,7 +252,7 @@ func (s *Server) TextDocumentDefinition(context *glsp.Context, params *protocol.
 // For every other SV construct (module, typedef, in-body function/task,
 // ...) there's no meaningful declaration/definition split, so the two
 // handlers return the same thing.
-func (s *Server) TextDocumentDeclaration(context *glsp.Context, params *protocol.DeclarationParams) (any, error) {
+func (s *Server) TextDocumentDeclaration(_ *glsp.Context, params *protocol.DeclarationParams) (any, error) {
 	return s.resolveWordAt(params.TextDocument.URI, params.Position, s.index.FindDeclaration)
 }
 
@@ -259,7 +286,7 @@ func (s *Server) resolveWordAt(
 	}
 	line, character := int(position.Line), int(position.Character)
 
-	toks := sv.Lex(text) // lexed once, shared by every probe below -- see sv.Tokens
+	toks := s.tokensFor(uri, text) // shared by every probe below -- see sv.Tokens
 
 	if path, inDirective, ok := sv.IncludePathIn(toks, line, character); inDirective {
 		if !ok {
@@ -285,14 +312,11 @@ func (s *Server) resolveWordAt(
 	}
 
 	if receiver, receiverStart, ok := sv.DotReceiverAt(text, line, start); ok {
-		if loc, ok := s.structFieldLocation(uri, text, line, character, receiver, receiverStart, word); ok {
-			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
-		}
-		if loc, ok := s.interfaceMemberLocation(uri, text, line, character, receiver, receiverStart, word); ok {
-			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
-		}
-		if loc, ok := s.modportLocation(uri, text, line, character, receiver, receiverStart, word); ok {
-			return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+		recvQualifier, recvHasQualifier := sv.QualifierAt(text, line, receiverStart)
+		if recv, ok := s.index.HoverInfo(uri, line, character, receiver, recvQualifier, recvHasQualifier); ok {
+			if loc, ok := s.memberLocation(&recv, word); ok {
+				return []protocol.Location{{URI: protocol.DocumentUri(loc.URI), Range: nameRange(loc.Line, loc.Character, word)}}, nil
+			}
 		}
 	}
 
@@ -305,6 +329,26 @@ func (s *Server) resolveWordAt(
 	return formatLocations(locs, word), nil
 }
 
+// memberLocation resolves "receiver.word" to word's declaration, given
+// receiver's own resolved declaration: a struct/union field first, then an
+// interface member, then a modport.
+//
+// The caller resolves receiver once and hands it to every lookup here,
+// rather than each lookup resolving it again: a receiver that turns out not
+// to be a struct (an interface instance, or a hierarchical reference
+// matching nothing) used to be resolved once per candidate kind. Scope
+// resolution for it uses the original cursor position, not receiver's own
+// column, the same as every other lookup from this position.
+func (s *Server) memberLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if loc, ok := s.structFieldLocation(recv, word); ok {
+		return loc, true
+	}
+	if loc, ok := s.interfaceMemberLocation(recv, word); ok {
+		return loc, true
+	}
+	return s.modportLocation(recv, word)
+}
+
 // structFieldLocation resolves "receiver.word" to the field's own
 // declaration inside its struct/union typedef, mirroring structFieldHover
 // on the query side.
@@ -315,10 +359,8 @@ func (s *Server) resolveWordAt(
 // through the receiver's type, so on "link.addr" where some unrelated
 // module also declares a port "addr", hover was right and F12 jumped into
 // the unrelated module -- silently wrong rather than simply empty.
-func (s *Server) structFieldLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) structFieldLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if recv.TypeName == "" {
 		return sv.Location{}, false
 	}
 	return s.index.StructFieldLocation(recv.TypeName, word)
@@ -332,10 +374,8 @@ func (s *Server) structFieldLocation(uri, text string, line, character int, rece
 // interface member's own Declaration already carries a real position, so
 // this needs no analogue of struct-field goto-definition's missing-target
 // problem.
-func (s *Server) interfaceMemberLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.TypeName == "" {
+func (s *Server) interfaceMemberLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if recv.TypeName == "" {
 		return sv.Location{}, false
 	}
 	locs, ok := s.index.FindInterfaceMember(recv.TypeName, word)
@@ -350,10 +390,8 @@ func (s *Server) interfaceMemberLocation(uri, text string, line, character int, 
 // except gated on recv.Kind == KindInterface rather than recv.TypeName !=
 // "", since an interface name IS a type (it has none of its own to point
 // at).
-func (s *Server) modportLocation(uri, text string, line, character int, receiver string, receiverStart int, word string) (sv.Location, bool) {
-	qualifier, hasQualifier := sv.QualifierAt(text, line, receiverStart)
-	recv, ok := s.index.HoverInfo(uri, line, character, receiver, qualifier, hasQualifier)
-	if !ok || recv.Kind != sv.KindInterface {
+func (s *Server) modportLocation(recv *sv.Declaration, word string) (sv.Location, bool) {
+	if recv.Kind != sv.KindInterface {
 		return sv.Location{}, false
 	}
 	locs, ok := s.index.FindModport(recv.Name, word)
@@ -444,14 +482,14 @@ const maxSymbolCompletions = 200
 //     empty-prefix request here.
 //
 // No path attempts keyword completion.
-func (s *Server) TextDocumentCompletion(context *glsp.Context, params *protocol.CompletionParams) (any, error) {
+func (s *Server) TextDocumentCompletion(_ *glsp.Context, params *protocol.CompletionParams) (any, error) {
 	text, ok := s.textForURI(params.TextDocument.URI)
 	if !ok {
 		return nil, nil
 	}
 	line, character := int(params.Position.Line), int(params.Position.Character)
 
-	toks := sv.Lex(text) // lexed once, shared by both context probes below -- see sv.Tokens
+	toks := s.tokensFor(params.TextDocument.URI, text) // shared by both context probes below -- see sv.Tokens
 	if moduleName, connected, ok := sv.InstantiationContextIn(toks, line, character); ok {
 		var items []protocol.CompletionItem
 		if ports, ok := s.index.Ports(moduleName); ok {
@@ -642,7 +680,7 @@ func completionItemKindFor(kind sv.Kind) protocol.CompletionItemKind {
 		return protocol.CompletionItemKindStruct
 	case sv.KindEnumMember:
 		return protocol.CompletionItemKindEnumMember
-	case sv.KindVariable:
+	case sv.KindVariable, sv.KindArgument:
 		return protocol.CompletionItemKindVariable
 	case sv.KindPort:
 		return protocol.CompletionItemKindProperty
@@ -687,18 +725,23 @@ func initializeSearchStart(params *protocol.InitializeParams) string {
 	return "."
 }
 
+// workspaceRoots lists the client's workspace folders, falling back to the
+// deprecated singular rootUri, as roots. A folder whose URI isn't a
+// file:// path is left out rather than recorded with an empty Path.
 func workspaceRoots(params *protocol.InitializeParams) []workspace.Root {
 	if len(params.WorkspaceFolders) > 0 {
 		roots := make([]workspace.Root, 0, len(params.WorkspaceFolders))
 		for _, folder := range params.WorkspaceFolders {
-			path, _ := uriToPath(folder.URI)
-			roots = append(roots, workspace.Root{URI: folder.URI, Path: path})
+			if path, err := uriToPath(folder.URI); err == nil {
+				roots = append(roots, workspace.Root{URI: folder.URI, Path: path})
+			}
 		}
 		return roots
 	}
 	if params.RootURI != nil {
-		path, _ := uriToPath(*params.RootURI)
-		return []workspace.Root{{URI: *params.RootURI, Path: path}}
+		if path, err := uriToPath(*params.RootURI); err == nil {
+			return []workspace.Root{{URI: *params.RootURI, Path: path}}
+		}
 	}
 	return nil
 }

@@ -44,6 +44,7 @@ Each filelist entry may itself point at other filelists (nested, resolved recurs
 - No type-checking, width-checking, or elaboration: diagnostics are syntax-level only (malformed directives, unterminated constructs, unresolved `` `include``s), with a minimal-range, push-only (no LSP 3.17 pull) shape
 - Unsupported constructs: non-ANSI port declarations, `specparam`, user-defined nettypes, class parameterization (`#(...)` on a class type, `extends`, or instantiation), `` `begin_keywords``/`` `end_keywords``, and a bare (non-typedef'd) enum/struct/union used inline as a variable's type
 - A couple of narrow preprocessor edge cases: the escaped-quote-within-stringify macro operator, and an `` `include`` argument built via macro expansion
+- POSIX paths only: `file://` URIs with a Windows drive letter aren't converted to native paths, so Windows isn't supported
 
 ## Helix example
 

@@ -18,8 +18,8 @@ func TestIndexLookup(t *testing.T) {
 	if locs[0].URI != "file:///a.sv" || locs[0].Line != 0 || locs[0].Character != 7 {
 		t.Fatalf("unexpected location: %+v", locs[0])
 	}
-	if ix.FileCount() != 1 {
-		t.Fatalf("FileCount() = %d, want 1", ix.FileCount())
+	if len(ix.files) != 1 {
+		t.Fatalf("indexed %d files, want 1", len(ix.files))
 	}
 }
 
@@ -62,8 +62,8 @@ func TestIndexRemoveFile(t *testing.T) {
 	if _, ok := ix.Lookup("top"); ok {
 		t.Fatalf("expected top to be gone after RemoveFile")
 	}
-	if ix.FileCount() != 0 {
-		t.Fatalf("FileCount() = %d, want 0", ix.FileCount())
+	if len(ix.files) != 0 {
+		t.Fatalf("indexed %d files, want 0", len(ix.files))
 	}
 }
 
@@ -112,7 +112,7 @@ func TestFindInstantiationPortAlsoResolvesParameterOverrides(t *testing.T) {
 	}
 
 	decl, ok := ix.InstantiationPortInfo("leaf", "WIDTH")
-	if !ok || decl.Kind != KindParameter || decl.Detail != "int" || decl.Default != "8" {
+	if !ok || decl.Kind != KindParameter || decl.Detail != "int" || decl.Default() != "8" {
 		t.Fatalf("InstantiationPortInfo(leaf, WIDTH) = %+v, %v", decl, ok)
 	}
 }
@@ -632,7 +632,7 @@ func TestIndexTypedefReturnsFullDeclaration(t *testing.T) {
 	ix.SetFile("file:///a.sv", "typedef struct packed { logic [7:0] a; } bus_t;\n")
 
 	d, ok := ix.Typedef("bus_t")
-	if !ok || d.Kind != KindTypedef || d.TypedefKind != "struct" || len(d.Fields) != 1 {
+	if !ok || d.Kind != KindTypedef || d.TypedefKind() != "struct" || len(d.Fields()) != 1 {
 		t.Fatalf("Typedef(bus_t) = %+v, %v", d, ok)
 	}
 }
@@ -838,7 +838,7 @@ func TestHoverInfoResolvesScopeChain(t *testing.T) {
 	ix.SetFile("file:///top.sv", "module top;\n  leaf u_leaf();\nendmodule\n")
 
 	d, ok := ix.HoverInfo("file:///top.sv", 1, 3, "leaf", "", false)
-	if !ok || d.Kind != KindModule || len(d.Ports) != 1 || d.Ports[0].Name != "clk" {
+	if !ok || d.Kind != KindModule || len(d.Ports()) != 1 || d.Ports()[0].Name != "clk" {
 		t.Fatalf("HoverInfo(leaf) = %+v, %v", d, ok)
 	}
 }
@@ -868,7 +868,7 @@ func TestHoverInfoResolvesFileScopeDeclarationWithNoEnclosingContainer(t *testin
 
 func TestFindDefinitionResolvesTypedefFromIncludedFile(t *testing.T) {
 	// The scope-chain walk is bucket-local and typedef isn't in
-	// GloballyReferenceableKinds, so without the explicit "search this
+	// IsGloballyReferenceable, so without the explicit "search this
 	// file's own `include d files" step, a typedef pulled in via
 	// `include would never resolve from the includer at all -- the
 	// entire point of attributing it to its own file in the first place.
@@ -1370,30 +1370,23 @@ func TestRemoveFileClearsItsDependencies(t *testing.T) {
 	}
 }
 
-func TestAllKnownURIsIncludesEveryScannedFile(t *testing.T) {
+func TestIndexHoldsEveryScannedFile(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module a; endmodule")
 	ix.SetFile("file:///b.sv", "module b; endmodule")
 
-	known := ix.AllKnownURIs()
-	want := map[string]bool{"file:///a.sv": true, "file:///b.sv": true}
-	if len(known) != len(want) {
-		t.Fatalf("AllKnownURIs() = %v, want %v", known, want)
-	}
-	for _, uri := range known {
-		if !want[uri] {
-			t.Fatalf("unexpected URI %s in AllKnownURIs()", uri)
-		}
+	if got, want := sortedKeys(ix.files), []string{"file:///a.sv", "file:///b.sv"}; !slices.Equal(got, want) {
+		t.Fatalf("indexed %v, want %v", got, want)
 	}
 }
 
-func TestAllKnownURIsShrinksAfterRemoveFile(t *testing.T) {
+func TestIndexForgetsARemovedFile(t *testing.T) {
 	ix := NewIndex()
 	ix.SetFile("file:///a.sv", "module a; endmodule")
 	ix.RemoveFile("file:///a.sv")
 
-	if known := ix.AllKnownURIs(); len(known) != 0 {
-		t.Fatalf("AllKnownURIs() = %v, want none", known)
+	if len(ix.files) != 0 {
+		t.Fatalf("still indexed after RemoveFile: %v", sortedKeys(ix.files))
 	}
 }
 
@@ -1536,8 +1529,8 @@ func TestHoverInfoResolvesQualifiedPackageMemberFromIncludedFile(t *testing.T) {
 	if !ok || d.Kind != KindTypedef || d.Name != "t_header_cfg" {
 		t.Fatalf("HoverInfo(pkg_cfg::t_header_cfg) = %+v, %v", d, ok)
 	}
-	if d.TypedefKind != "struct" {
-		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind)
+	if d.TypedefKind() != "struct" {
+		t.Fatalf("expected the struct typedef itself, got TypedefKind %q", d.TypedefKind())
 	}
 
 	// The inline sibling, which never lost its Parent link, must still
@@ -1961,6 +1954,26 @@ func BenchmarkWorkspaceSymbolsEmptyQuery(b *testing.B) {
 	}
 }
 
+// A short prefix that every one of 50k names matches: completion's worst
+// case, and the one an editor hits on the first character typed.
+func BenchmarkCompleteSymbolsWidePrefix(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.CompleteSymbols("mod_", 200)
+	}
+}
+
+// A prefix only a handful of 50k names match, so the cost is finding them
+// rather than ranking them.
+func BenchmarkCompleteSymbolsNarrowPrefix(b *testing.B) {
+	ix := buildWideIndex(50000)
+	b.ResetTimer()
+	for range b.N {
+		ix.CompleteSymbols("mod_4999", 200)
+	}
+}
+
 // The reported collision: a struct field whose name is also an unrelated
 // module's port. Before ScopedOccurrencesForStructField the field query
 // resolved to nothing and fell back to the unscoped, name-wide list, so
@@ -2053,6 +2066,34 @@ func TestSetFileRetractsAnIncludeThatIsNoLongerThere(t *testing.T) {
 	}
 }
 
+// A named connection inside a dropped header must stop counting as a
+// reference to the port it connects, or renaming the port writes an edit
+// into a file the build no longer reads.
+func TestSetFileRetractsConnectionSitesOfADroppedInclude(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"inst.svh": "leaf u0 (.clk(c));\n"}}
+	})
+	ix.SetFile("file:///leaf.sv", "module leaf(input logic clk);\nendmodule\n")
+	ix.SetFile("file:///top.sv", "module top;\n`include \"inst.svh\"\nendmodule\n")
+
+	inHeader := func() bool {
+		return slices.ContainsFunc(ix.ScopedOccurrencesForInstantiationConnection("leaf", "clk"), func(l Location) bool {
+			return l.URI == "file:///inst.svh"
+		})
+	}
+	if !inHeader() {
+		t.Fatalf("expected the header's connection site while the include is present")
+	}
+
+	ix.SetFile("file:///top.sv", "module top;\nendmodule\n")
+
+	if inHeader() {
+		t.Fatalf("the dropped header's connection site still counts as a reference: %+v",
+			ix.ScopedOccurrencesForInstantiationConnection("leaf", "clk"))
+	}
+}
+
 // A header two files include must survive one of them dropping it.
 func TestSetFileKeepsAnIncludeAnotherFileStillHas(t *testing.T) {
 	ix := NewIndex()
@@ -2112,7 +2153,7 @@ func TestHoverInfoPicksTheSameDeclarationRegardlessOfIndexOrder(t *testing.T) {
 	if !ok1 || !ok2 {
 		t.Fatalf("expected cfg_t to resolve in both orders (%v, %v)", ok1, ok2)
 	}
-	if got1.Line != got2.Line || got1.AliasType != got2.AliasType {
+	if got1.Line != got2.Line || got1.AliasType() != got2.AliasType() {
 		t.Fatalf("index order changed the answer: %+v vs %+v", got1, got2)
 	}
 }
@@ -2203,5 +2244,353 @@ func TestStructFieldLocationPointsAtTheFieldsOwnDeclaration(t *testing.T) {
 	}
 	if _, ok := ix.StructFieldLocation("ty_bundle", "nope"); ok {
 		t.Fatalf("a non-member must not resolve")
+	}
+}
+
+// pkgMemberFixture is one package member X plus every shape of same-named
+// token the package-member reference filter must either drop or keep.
+func pkgMemberFixture() *Index {
+	ix := NewIndex()
+	ix.SetFile("file:///pkg.sv", "package pa;\n  localparam int X = 1;\n  localparam int Y = X + 1;\nendpackage\n")
+	ix.SetFile("file:///other.sv", "package other;\n  localparam int X = 2;\nendpackage\n")
+	// shadow: module port X and bare uses; named connection; member select.
+	ix.SetFile("file:///shadow.sv", "module shadow #(parameter int X = 0) ();\n  localparam int Z = X;\nendmodule\n"+
+		"module inst;\n  shadow #(.X(3)) u ();\n  initial a.X = 1;\nendmodule\n")
+	// qualified uses of both packages, an importing module, and an
+	// unresolvable bare use.
+	ix.SetFile("file:///user.sv", "module user;\n  localparam int A = pa::X;\n  localparam int B = other::X;\nendmodule\n"+
+		"module imp;\n  import pa::*;\n  localparam int C = X;\nendmodule\n"+
+		"module bare;\n  localparam int D = X;\nendmodule\n")
+	return ix
+}
+
+func pkgMemberLines(locs []Location) map[string][]int {
+	out := map[string][]int{}
+	for _, l := range locs {
+		out[l.URI] = append(out[l.URI], l.Line)
+	}
+	return out
+}
+
+func TestScopedOccurrencesPackageMemberDropsProvablyUnrelated(t *testing.T) {
+	ix := pkgMemberFixture()
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))
+
+	if len(got["file:///other.sv"]) != 0 {
+		t.Errorf("other package's X must be dropped, got %v", got["file:///other.sv"])
+	}
+	// shadow.sv: port X (line 0), its bare use (line 1), connection (line 4)
+	// and member select (line 5) are all different symbols.
+	if len(got["file:///shadow.sv"]) != 0 {
+		t.Errorf("shadowed/connection/member-select X must be dropped, got %v", got["file:///shadow.sv"])
+	}
+	for _, l := range got["file:///user.sv"] {
+		if l == 2 {
+			t.Errorf("other::X must be dropped, got line %d", l)
+		}
+	}
+}
+
+func TestScopedOccurrencesPackageMemberKeepsPossibleReferences(t *testing.T) {
+	ix := pkgMemberFixture()
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))
+
+	if want := []int{1, 2}; len(got["file:///pkg.sv"]) != 2 || got["file:///pkg.sv"][0] != want[0] || got["file:///pkg.sv"][1] != want[1] {
+		t.Errorf("declaration and in-package use must be kept, got %v", got["file:///pkg.sv"])
+	}
+	kept := map[int]bool{}
+	for _, l := range got["file:///user.sv"] {
+		kept[l] = true
+	}
+	for _, line := range []int{1, 6, 9} { // pa::X, imported bare X, unresolvable bare X
+		if !kept[line] {
+			t.Errorf("user.sv line %d must be kept, got %v", line, got["file:///user.sv"])
+		}
+	}
+}
+
+func TestOccurrencesInFilePackageMemberDropsShadowed(t *testing.T) {
+	ix := pkgMemberFixture()
+	if locs := ix.OccurrencesInFile("file:///shadow.sv", 1, 22, "X", "", false); len(locs) != 3 {
+		// Cursor on the module's own port X resolves to the port, so this
+		// stays module-scoped: port decl, its use, and the .X( connection.
+		t.Errorf("expected module-scoped result, got %+v", locs)
+	}
+	locs := ix.OccurrencesInFile("file:///pkg.sv", 1, 17, "X", "", false)
+	if len(locs) != 2 {
+		t.Errorf("expected only the pkg.sv occurrences, got %+v", locs)
+	}
+}
+
+func TestScopedOccurrencesPackageMemberNestedShadowing(t *testing.T) {
+	ix := NewIndex()
+	// Inside pa, both pa (the target) and class C (its own X) declare X:
+	// the narrower scope decides, so only the use in pa's body is kept.
+	ix.SetFile("file:///pkg.sv", "package pa;\n  localparam int X = 1;\n  localparam int Y = X;\n"+
+		"  class C;\n    int X;\n    function int f();\n      return X;\n    endfunction\n  endclass\nendpackage\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))["file:///pkg.sv"]
+	if len(got) != 2 || got[0] != 1 || got[1] != 2 {
+		t.Fatalf("expected pkg.sv lines 1 and 2 only, got %v", got)
+	}
+}
+
+func TestFunctionArgumentResolvesInsideBody(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module m;\n  logic a;\n  function int f(input int a);\n    return a;\n  endfunction\nendmodule\n")
+
+	locs, ok := ix.FindDefinition("file:///a.sv", 3, 11, "a", "", false)
+	if !ok || len(locs) != 1 || locs[0].Line != 2 {
+		t.Fatalf("expected the argument on line 2, got %+v (ok=%v)", locs, ok)
+	}
+	d, ok := ix.HoverInfo("file:///a.sv", 3, 11, "a", "", false)
+	if !ok || d.Kind != KindArgument {
+		t.Fatalf("expected KindArgument hover, got %+v (ok=%v)", d, ok)
+	}
+}
+
+func TestScopedOccurrencesArgumentRestrictedToSubprogram(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module m;\n  logic a;\n  assign a = 1;\n"+
+		"  function int f(input int a);\n    return a;\n  endfunction\n"+
+		"  task t(input int a);\n    $display(a);\n  endtask\nendmodule\n")
+	ix.SetFile("file:///b.sv", "module n;\n  function int g(int a);\n    return a;\n  endfunction\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///a.sv", 4, 11, "a", "", false))
+	if len(got["file:///b.sv"]) != 0 {
+		t.Errorf("another file's same-named argument must be excluded, got %v", got["file:///b.sv"])
+	}
+	if a := got["file:///a.sv"]; len(a) != 2 || a[0] != 3 || a[1] != 4 {
+		t.Errorf("expected only f's argument and its use (lines 3, 4), got %v", a)
+	}
+}
+
+func TestScopedOccurrencesArgumentKeepsNamedCallSites(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "package p;\n  function int f(int a);\n    return a;\n  endfunction\nendpackage\n")
+	ix.SetFile("file:///b.sv", "module leaf(input logic a);\nendmodule\n"+
+		"module top;\n  logic s;\n  leaf u (.a(s));\n  initial s = p::f(.a(1));\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///a.sv", 2, 11, "a", "", false))
+	// b.sv line 5 is the named call argument; line 4 is a port connection
+	// and line 0 an unrelated port.
+	if b := got["file:///b.sv"]; len(b) != 1 || b[0] != 5 {
+		t.Errorf("expected only the named call site (b.sv line 5), got %v", b)
+	}
+}
+
+func TestScopedOccurrencesPackageMemberDropsArgumentShadow(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///pkg.sv", "package pa;\n  localparam int X = 1;\nendpackage\n")
+	ix.SetFile("file:///m.sv", "module m;\n  import pa::*;\n  localparam int A = X;\n"+
+		"  function int f(int X);\n    return X;\n  endfunction\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///pkg.sv", 1, 17, "X", "", false))["file:///m.sv"]
+	if len(got) != 1 || got[0] != 2 {
+		t.Fatalf("expected only m.sv line 2 (the argument and its use are dropped), got %v", got)
+	}
+}
+
+func TestPrototypeArgumentsNotIndexed(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "class C;\n  extern function void m(int a);\nendclass\n")
+	for _, d := range ix.FileDeclarations("file:///a.sv") {
+		if d.Kind == KindArgument {
+			t.Fatalf("prototype argument indexed: %+v", d)
+		}
+	}
+}
+
+func TestScopedOccurrencesLocalParamExcludesChildOverrideName(t *testing.T) {
+	ix := NewIndex()
+	const uri = "file:///top.sv"
+	ix.SetFile("file:///leaf.sv", "module leaf #(parameter P = 1)();\nendmodule\n")
+	ix.SetFile(uri, "module top;\n  localparam P = 2;\n  leaf #(.P(P)) u();\nendmodule\n")
+
+	locs := ix.ScopedOccurrences(uri, 1, 13, "P", "", false)
+
+	seen := map[[2]int]bool{}
+	for _, l := range locs {
+		k := [2]int{l.Line, l.Character}
+		if seen[k] {
+			t.Fatalf("duplicate location %+v in %+v", l, locs)
+		}
+		seen[k] = true
+		if l.Line == 2 && l.Character == 10 {
+			t.Fatalf("child's .P override name attributed to top's P: %+v", locs)
+		}
+	}
+	if !seen[[2]int{1, 13}] || !seen[[2]int{2, 12}] {
+		t.Fatalf("expected declaration and (P) use, got %+v", locs)
+	}
+}
+
+// fileScopeFixture is a file-scope typedef T plus every shape of same-named
+// token the occurrence filter must either drop or keep for it.
+func fileScopeFixture() *Index {
+	ix := NewIndex()
+	ix.SetFile("file:///defs.sv", "typedef logic [7:0] T;\n")
+	ix.SetFile("file:///m1.sv", "module m1 #(parameter int T = 0) ();\n  localparam int Z = T;\nendmodule\n")
+	ix.SetFile("file:///m2.sv", "module m2;\n  m1 #(.T(1)) u ();\n  initial a.T = 1;\n  localparam int B = other::T;\n  T x;\nendmodule\n")
+	ix.SetFile("file:///other.sv", "package other;\n  localparam int T = 2;\nendpackage\n")
+	ix.SetFile("file:///m3.sv", "module m3;\n  localparam int T = 3;\n  $unit::T y;\n  T z;\nendmodule\n")
+	// A second file-scope T, as an `ifdef variant would be.
+	ix.SetFile("file:///alt.sv", "typedef int T;\nmodule m4;\n  T w;\nendmodule\n")
+	return ix
+}
+
+func TestScopedOccurrencesFileScopeDropsProvablyUnrelated(t *testing.T) {
+	got := pkgMemberLines(fileScopeFixture().ScopedOccurrences("file:///defs.sv", 0, 20, "T", "", false))
+
+	for _, uri := range []string{"file:///m1.sv", "file:///other.sv"} {
+		if len(got[uri]) != 0 {
+			t.Errorf("%s: shadowed/other-package T must be dropped, got %v", uri, got[uri])
+		}
+	}
+	// m2.sv: .T( connection (1), a.T (2), other::T (3) dropped; bare T (4) kept.
+	if m2 := got["file:///m2.sv"]; len(m2) != 1 || m2[0] != 4 {
+		t.Errorf("m2.sv: expected only line 4, got %v", m2)
+	}
+	// m3.sv: local T (1) and its bare use (3) dropped; $unit::T (2) kept.
+	if m3 := got["file:///m3.sv"]; len(m3) != 1 || m3[0] != 2 {
+		t.Errorf("m3.sv: expected only the $unit::T on line 2, got %v", m3)
+	}
+}
+
+func TestScopedOccurrencesFileScopeKeepsOtherFileScopeVariant(t *testing.T) {
+	got := pkgMemberLines(fileScopeFixture().ScopedOccurrences("file:///defs.sv", 0, 20, "T", "", false))
+	// Another file's file-scope T is never treated as shadowing: it may be
+	// the same symbol under a different `ifdef.
+	if alt := got["file:///alt.sv"]; len(alt) != 2 || alt[0] != 0 || alt[1] != 2 {
+		t.Errorf("alt.sv: expected lines 0 and 2 kept, got %v", alt)
+	}
+	if d := got["file:///defs.sv"]; len(d) != 1 || d[0] != 0 {
+		t.Errorf("defs.sv: expected the declaration kept, got %v", d)
+	}
+}
+
+func TestScopedOccurrencesFileScopeKeepsPackageQualifiedViaInclude(t *testing.T) {
+	ix := NewIndex()
+	ix.SetIncludeResolverFactory(func() IncludeResolver {
+		return &stubResolver{files: map[string]string{"hdr.svh": "typedef int H;\n"}}
+	})
+	ix.SetFile("file:///pkg.sv", "package pkg;\n`include \"hdr.svh\"\nendpackage\n")
+	ix.SetFile("file:///use.sv", "module u;\n  pkg::H a;\n  localparam int H = 1;\n  H b;\nendmodule\n")
+
+	got := pkgMemberLines(ix.ScopedOccurrences("file:///hdr.svh", 0, 12, "H", "", false))
+	// pkg::H reaches the header's file-scope H through the include; the
+	// module-local H and its use are a different symbol.
+	if u := got["file:///use.sv"]; len(u) != 1 || u[0] != 1 {
+		t.Errorf("use.sv: expected only pkg::H on line 1, got %v", u)
+	}
+}
+
+func TestOccurrencesInFileFileScopeDropsShadowed(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "typedef int T;\nmodule k #(parameter int T = 0) ();\nendmodule\nmodule j;\n  T v;\nendmodule\n")
+
+	var lines []int
+	for _, l := range ix.OccurrencesInFile("file:///a.sv", 0, 12, "T", "", false) {
+		lines = append(lines, l.Line)
+	}
+	if len(lines) != 2 || lines[0] != 0 || lines[1] != 4 {
+		t.Fatalf("expected lines 0 and 4 (k's parameter dropped), got %v", lines)
+	}
+}
+
+func TestOccurrenceRecordsUnitQualifier(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", "module m;\n  $unit::T y;\nendmodule\n")
+	occs := ix.occByName["T"]["file:///a.sv"]
+	if len(occs) != 1 || occs[0].qualifier() != "$unit" {
+		t.Fatalf("expected one T occurrence qualified by $unit, got %+v", occs)
+	}
+}
+
+// The index stores an occurrence's receiver, qualifier and named-argument
+// flag in one field (see occurrence), which is only lossless while the
+// scanner never sets more than one of them on the same token.
+func TestStoredOccurrenceKeepsReceiverQualifierAndNamedArg(t *testing.T) {
+	src := "module top;\n" +
+		"  assign x = st.field + a . b + pkg::member + $unit::T;\n" +
+		"  leaf u0 (.clk(clk), .rst(r));\n" +
+		"  initial f(.arg(1), .other(2));\n" +
+		"endmodule\n"
+	occs := occurrencesFromSVParseTokens(Lex(src))
+	if len(occs) == 0 {
+		t.Fatal("no occurrences scanned")
+	}
+	var receivers, qualifiers, namedArgs int
+	for _, o := range occs {
+		if o.Receiver != "" {
+			receivers++
+		}
+		if o.Qualifier != "" {
+			qualifiers++
+		}
+		if o.NamedArg {
+			namedArgs++
+		}
+		set := 0
+		for _, b := range []bool{o.Receiver != "", o.Qualifier != "", o.NamedArg} {
+			if b {
+				set++
+			}
+		}
+		if set > 1 {
+			t.Fatalf("%+v sets more than one of Receiver, Qualifier and NamedArg", o)
+		}
+		s := o.stored()
+		if s.receiver() != o.Receiver || s.qualifier() != o.Qualifier || s.namedArg() != o.NamedArg ||
+			int(s.line) != o.Line || int(s.character) != o.Character {
+			t.Fatalf("stored form %+v lost information from %+v", s, o)
+		}
+	}
+	if receivers == 0 || qualifiers == 0 || namedArgs == 0 {
+		t.Fatalf("source doesn't exercise every kind: %d receivers, %d qualifiers, %d named args", receivers, qualifiers, namedArgs)
+	}
+}
+
+// Rescanning a file drops exactly its own entries from each name's global
+// list, in order, whether they sit at the tail (the file was indexed last)
+// or between other files' entries.
+func TestSetFileReplacesOnlyItsOwnByNameEntries(t *testing.T) {
+	ix := NewIndex()
+	twoX := "module a(input logic x);\n  logic x;\nendmodule\n"
+	oneX := func(m string) string { return "module " + m + ";\n  logic x;\nendmodule\n" }
+	uris := func() []string {
+		locs, _ := ix.Lookup("x")
+		var out []string
+		for _, l := range locs {
+			out = append(out, l.URI)
+		}
+		return out
+	}
+
+	ix.SetFile("file:///a.sv", twoX)
+	ix.SetFile("file:///b.sv", oneX("b"))
+	ix.SetFile("file:///c.sv", oneX("c"))
+	want := []string{"file:///a.sv", "file:///a.sv", "file:///b.sv", "file:///c.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after indexing: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///a.sv", twoX) // entries ahead of other files': filtered
+	want = []string{"file:///b.sv", "file:///c.sv", "file:///a.sv", "file:///a.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after rescanning a.sv: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///a.sv", oneX("a")) // entries at the tail: popped
+	want = []string{"file:///b.sv", "file:///c.sv", "file:///a.sv"}
+	if got := uris(); !slices.Equal(got, want) {
+		t.Fatalf("after rescanning a.sv again: %v, want %v", got, want)
+	}
+
+	ix.SetFile("file:///b.sv", "module b;\nendmodule\n")
+	ix.RemoveFile("file:///c.sv")
+	ix.RemoveFile("file:///a.sv")
+	if got := uris(); got != nil {
+		t.Fatalf("x still declared in %v after every declaration was removed", got)
 	}
 }
