@@ -1305,3 +1305,35 @@ func TestScanRecordsParameterizedClassTypedVariable(t *testing.T) {
 	}
 	t.Fatalf("obj was not indexed at all: %+v", decls)
 }
+
+// Generate constructs are structured nodes in svparse, but their contents
+// still belong to the enclosing module.
+func TestScanDeclarationsSeesInsideGenerateConstructs(t *testing.T) {
+	src := `module top;
+  generate
+    for (genvar i = 0; i < 2; i++) begin : g
+      if (i == 0) wire in_if; else begin : e
+        logic in_else;
+      end
+    end
+    case (1)
+      1: logic in_case;
+      default: ;
+    endcase
+  endgenerate
+endmodule
+`
+	decls := ScanDeclarations("test.sv", src)
+	top := -1
+	for i, d := range decls {
+		if d.Name == "top" {
+			top = i
+		}
+	}
+	for _, name := range []string{"in_if", "in_else", "in_case"} {
+		d := findDecl(t, decls, name)
+		if d.Parent != top {
+			t.Errorf("%s: parent %d, want the module (%d)", name, d.Parent, top)
+		}
+	}
+}

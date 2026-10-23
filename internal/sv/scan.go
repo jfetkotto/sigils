@@ -466,6 +466,24 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 		}
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
 
+	// Generate constructs add no outline level: their contents belong to the
+	// enclosing scope, as they did when svparse flattened them.
+	case *ast.GenerateRegion:
+		walkDecls(n.Body, uri, parent, buckets, impBuckets, connBuckets, links)
+	case *ast.GenerateBlock:
+		walkDecls(n.Body, uri, parent, buckets, impBuckets, connBuckets, links)
+	case *ast.GenerateIf:
+		walkDecls([]ast.Decl{n.Then}, uri, parent, buckets, impBuckets, connBuckets, links)
+		if n.Else != nil {
+			walkDecls([]ast.Decl{n.Else}, uri, parent, buckets, impBuckets, connBuckets, links)
+		}
+	case *ast.GenerateFor:
+		walkDecls([]ast.Decl{n.Body}, uri, parent, buckets, impBuckets, connBuckets, links)
+	case *ast.GenerateCase:
+		for i := range n.Items {
+			walkDecls([]ast.Decl{n.Items[i].Body}, uri, parent, buckets, impBuckets, connBuckets, links)
+		}
+
 	case *ast.Class:
 		idx := appendDecl(buckets, uri, Declaration{
 			Kind: KindClass, Name: n.Name,
