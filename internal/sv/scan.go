@@ -267,8 +267,10 @@ func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]s
 	lexToks, _ := lexer.Lex(text) // lex errors don't block occurrence collection -- best-effort on malformed/mid-edit text
 	res := ScanResult{Occurrences: occurrencesFromSVParseTokens(lexToks)}
 
-	ppToks, ppErrs := preprocessor.PreprocessWithOptions(uri, text, resolver, preprocessor.Options{InitialMacros: initialMacros})
+	pre := preprocessor.PreprocessDetailed(uri, text, resolver, preprocessor.Options{InitialMacros: initialMacros, KeepComments: true})
+	ppToks, ppErrs := pre.Tokens, pre.Errors
 	f, parseErrs := parser.Parse(uri, ppToks)
+	res.Directives = directiveComments(pre.Comments)
 
 	res.Diagnostics = diagnosticsByFile(uri, ppErrs, parseErrs)
 	res.Decls, res.imports, res.connections, res.links = declarationsFromAST(f)
@@ -293,6 +295,10 @@ type ScanResult struct {
 	// `include d files inlined. The semantic layer (see internal/semantic)
 	// builds its compilation from these.
 	File *ast.File
+	// Directives are the comments that carry lint directives
+	// ("// svparse: disable=rule"), the only comments the semantic layer
+	// reads.
+	Directives []preprocessor.Comment
 
 	// imports, connections and links are the side channels only Index
 	// consumes: import statements (see importDecl), named instantiation
@@ -947,4 +953,16 @@ func IsIdentifier(name string) bool {
 // occurrence of, say, "module" in the workspace.
 func IsKeyword(name string) bool {
 	return svtoken.Keywords[name]
+}
+
+// directiveComments keeps the comments that can be lint directives, so the
+// index does not hold every comment of the workspace for the few that matter.
+func directiveComments(all []preprocessor.Comment) []preprocessor.Comment {
+	var out []preprocessor.Comment
+	for _, c := range all {
+		if strings.Contains(c.Text, "svparse:") {
+			out = append(out, c)
+		}
+	}
+	return out
 }

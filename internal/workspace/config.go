@@ -26,6 +26,26 @@ type Config struct {
 	// are on unless this is false: a workspace whose dependencies are not all
 	// in the index may prefer the syntax errors alone.
 	SemanticDiagnostics *bool `json:"semanticDiagnostics,omitempty"`
+
+	// Lint tunes the lint rules, which run with the semantic diagnostics
+	// (so they stop with them). Absent, every rule runs at its default
+	// severity.
+	Lint *LintSettings `json:"lint,omitempty"`
+}
+
+// LintSettings is the "lint" section of .sigils.json. Rules maps a rule name
+// to "error", "warning", "info", "hint" or "off"; Ignore lists globs of files
+// whose findings are dropped. The names are svparse's (`svparse lint
+// --list-rules`).
+type LintSettings struct {
+	Enabled *bool             `json:"enabled,omitempty"`
+	Rules   map[string]string `json:"rules,omitempty"`
+	Ignore  []string          `json:"ignore,omitempty"`
+}
+
+// LintEnabled reports whether lint findings are published.
+func (c Config) LintEnabled() bool {
+	return c.Lint == nil || c.Lint.Enabled == nil || *c.Lint.Enabled
 }
 
 // SemanticDiagnosticsEnabled reports whether semantic diagnostics are on.

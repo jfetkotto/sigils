@@ -9,6 +9,7 @@ import (
 
 	"github.com/jfetkotto/svparse/v2/ast"
 	"github.com/jfetkotto/svparse/v2/lexer"
+	"github.com/jfetkotto/svparse/v2/preprocessor"
 )
 
 // Location is a declaration's position, independent of any LSP protocol
@@ -276,6 +277,8 @@ type Index struct {
 	// what it built from an earlier ASTs() snapshot is stale.
 	asts   map[string]*ast.File
 	astGen uint64
+	// directives[uri] are the lint directive comments of uri's last scan.
+	directives map[string][]preprocessor.Comment
 }
 
 // NewIndex returns an empty Index.
@@ -299,7 +302,34 @@ func NewIndex() *Index {
 		membersOf:          make(map[declRef][]ownedLink),
 		containerOf:        make(map[string][]ownedLink),
 		asts:               make(map[string]*ast.File),
+		directives:         make(map[string][]preprocessor.Comment),
 	}
+}
+
+// Snapshot is the parse trees and lint directive comments of the workspace at
+// one generation.
+type Snapshot struct {
+	Files      []*ast.File
+	Directives []preprocessor.Comment
+	Generation uint64
+}
+
+// Snapshot returns the trees (in URI order) and directive comments of every
+// scanned file. They are shared with the index and must not be modified.
+func (ix *Index) Snapshot() Snapshot {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	uris := make([]string, 0, len(ix.asts))
+	for uri := range ix.asts {
+		uris = append(uris, uri)
+	}
+	slices.Sort(uris)
+	snap := Snapshot{Files: make([]*ast.File, len(uris)), Generation: ix.astGen}
+	for i, uri := range uris {
+		snap.Files[i] = ix.asts[uri]
+		snap.Directives = append(snap.Directives, ix.directives[uri]...)
+	}
+	return snap
 }
 
 // ASTGeneration is the generation ASTs would return, without building the
@@ -308,24 +338,6 @@ func (ix *Index) ASTGeneration() uint64 {
 	ix.mu.RLock()
 	defer ix.mu.RUnlock()
 	return ix.astGen
-}
-
-// ASTs returns the parse tree of every scanned file in URI order, and a
-// generation number that changes whenever any of them does. Trees are
-// shared with the index and must not be modified.
-func (ix *Index) ASTs() ([]*ast.File, uint64) {
-	ix.mu.RLock()
-	defer ix.mu.RUnlock()
-	uris := make([]string, 0, len(ix.asts))
-	for uri := range ix.asts {
-		uris = append(uris, uri)
-	}
-	slices.Sort(uris)
-	files := make([]*ast.File, len(uris))
-	for i, uri := range uris {
-		files[i] = ix.asts[uri]
-	}
-	return files, ix.astGen
 }
 
 // Diagnostics returns every preprocessing/parsing problem recorded during
@@ -399,6 +411,11 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 
 	if res.File != nil {
 		ix.asts[uri] = res.File
+		if len(res.Directives) > 0 {
+			ix.directives[uri] = res.Directives
+		} else {
+			delete(ix.directives, uri)
+		}
 		ix.astGen++
 	}
 	touched := make(map[string]bool, len(declsByURI)+len(diagsByURI))
@@ -654,6 +671,7 @@ func (ix *Index) removeLocked(uri string) []string {
 	ix.clearScanBucketsLocked(uri)
 	if _, ok := ix.asts[uri]; ok {
 		delete(ix.asts, uri)
+		delete(ix.directives, uri)
 		ix.astGen++
 	}
 	ix.removeOccurrencesLocked(uri)

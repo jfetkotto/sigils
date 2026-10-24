@@ -16,26 +16,40 @@ import (
 	"github.com/jfetkotto/svparse/v2/ast"
 	"github.com/jfetkotto/svparse/v2/diag"
 	"github.com/jfetkotto/svparse/v2/elab"
+	"github.com/jfetkotto/svparse/v2/lint"
+	"github.com/jfetkotto/svparse/v2/preprocessor"
 	"github.com/jfetkotto/svparse/v2/sema"
 )
 
 // elaborationBudget caps the time elaboration may take in one diagnostics pass.
 const elaborationBudget = 5 * time.Second
 
-// Source supplies the workspace's parse trees and a generation number that
-// changes whenever any of them does (sv.Index.ASTs).
-type Source func() ([]*ast.File, uint64)
+// Snapshot is the workspace as the semantic model sees it: every file's parse
+// tree, the comments that carry lint directives, and a generation number that
+// changes whenever any of them does.
+type Snapshot struct {
+	Files      []*ast.File
+	Directives []preprocessor.Comment
+	Generation uint64
+}
+
+// Source supplies the current Snapshot (see sv.Index.Snapshot).
+type Source func() Snapshot
 
 // Service builds the semantic model on demand and caches it per generation.
 type Service struct {
 	source Source
 
-	mu    sync.Mutex
-	gen   uint64
-	built bool
-	comp  *sema.Compilation
-	model *sema.Model
-	files map[string]*ast.File
+	mu         sync.Mutex
+	gen        uint64
+	built      bool
+	comp       *sema.Compilation
+	model      *sema.Model
+	files      map[string]*ast.File
+	directives []preprocessor.Comment
+
+	// lint, if set, makes Diagnostics include the lint findings.
+	lint *lint.Config
 
 	diags    map[string][]diag.Diagnostic // by file, for generation diagGen
 	diagsGen uint64
@@ -157,7 +171,8 @@ func lastOf(path []ast.Expr) ast.Expr {
 // fileLocked returns uri's tree, rebuilding the model if the workspace
 // changed since it was last built.
 func (s *Service) fileLocked(uri string) *ast.File {
-	files, gen := s.source()
+	snap := s.source()
+	files, gen := snap.Files, snap.Generation
 	if !s.built || gen != s.gen {
 		comp := sema.NewCompilation(sema.Options{})
 		byURI := make(map[string]*ast.File, len(files))
@@ -166,6 +181,7 @@ func (s *Service) fileLocked(uri string) *ast.File {
 			byURI[f.Path] = f
 		}
 		s.comp, s.model, s.files, s.gen, s.built = comp, comp.Model(), byURI, gen, true
+		s.directives = snap.Directives
 		s.diagsOK = false
 	}
 	return s.files[uri]
@@ -372,9 +388,12 @@ func (s *Service) Diagnostics() (map[string][]diag.Diagnostic, uint64) {
 		// are not defined, port and parameter mismatches. It is bounded so a
 		// pathological design cannot stall the pass.
 		ctx, cancel := context.WithTimeout(context.Background(), elaborationBudget)
-		_, elabDiags := elab.Elaborate(ctx, s.comp, elab.Options{})
-		cancel()
+		design, elabDiags := elab.Elaborate(ctx, s.comp, elab.Options{})
 		set.AddAll(elabDiags)
+		if s.lint != nil {
+			set.AddAll(lint.Run(ctx, lint.Input{Comp: s.comp, Design: design, Comments: s.directives}, *s.lint))
+		}
+		cancel()
 		byFile := map[string][]diag.Diagnostic{}
 		for _, d := range set.Sorted() {
 			switch d.Code {
@@ -386,4 +405,13 @@ func (s *Service) Diagnostics() (map[string][]diag.Diagnostic, uint64) {
 		s.diags, s.diagsGen, s.diagsOK = byFile, s.gen, true
 	}
 	return s.diags, s.diagsGen
+}
+
+// SetLint turns lint findings in Diagnostics on, with cfg, or off with nil.
+// Findings already computed are discarded.
+func (s *Service) SetLint(cfg *lint.Config) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lint = cfg
+	s.diagsOK = false
 }
