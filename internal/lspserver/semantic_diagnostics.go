@@ -9,6 +9,7 @@ import (
 	"github.com/jfetkotto/svparse/v2/diag"
 	"github.com/jfetkotto/svparse/v2/lint"
 
+	"github.com/jfetkotto/sigils/internal/semantic"
 	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
@@ -119,4 +120,52 @@ func (s *Server) lintConfig(cfg workspace.Config) *lint.Config {
 		out = lint.Config{}
 	}
 	return &out
+}
+
+// semanticNavigation reports whether the workspace turned semantic navigation
+// on.
+func (s *Server) semanticNavigation() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.cfg.SemanticNavigationEnabled()
+}
+
+// semanticDefinition answers go-to-definition from the semantic model, when
+// that is turned on and the model resolves the name under the cursor.
+func (s *Server) semanticDefinition(uri string, pos protocol.Position) ([]protocol.Location, bool) {
+	if !s.semanticNavigation() {
+		return nil, false
+	}
+	locs, ok := s.sem.Definition(uri, int(pos.Line), int(pos.Character))
+	if !ok {
+		return nil, false
+	}
+	return toProtocolLocations(locs), true
+}
+
+// semanticReferences answers find-references from the semantic model, when
+// that is turned on and the model resolves the name under the cursor.
+func (s *Server) semanticReferences(uri string, pos protocol.Position, includeDeclaration bool) ([]protocol.Location, bool) {
+	if !s.semanticNavigation() {
+		return nil, false
+	}
+	locs, ok := s.sem.References(uri, int(pos.Line), int(pos.Character), includeDeclaration)
+	if !ok {
+		return nil, false
+	}
+	return toProtocolLocations(locs), true
+}
+
+func toProtocolLocations(locs []semantic.Location) []protocol.Location {
+	out := make([]protocol.Location, len(locs))
+	for i, l := range locs {
+		out[i] = protocol.Location{
+			URI: l.URI,
+			Range: protocol.Range{
+				Start: position(l.Line, l.Character),
+				End:   position(l.EndLine, l.EndCharacter),
+			},
+		}
+	}
+	return out
 }

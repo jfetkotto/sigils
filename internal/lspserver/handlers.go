@@ -247,6 +247,9 @@ func (s *Server) TextDocumentDidClose(_ *glsp.Context, params *protocol.DidClose
 // over an extern/pure-virtual/DPI-import prototype when both are known for
 // the same name -- see sv.Index.FindDefinition.
 func (s *Server) TextDocumentDefinition(_ *glsp.Context, params *protocol.DefinitionParams) (any, error) {
+	if locs, ok := s.semanticDefinition(params.TextDocument.URI, params.Position); ok {
+		return locs, nil
+	}
 	return s.resolveWordAt(params.TextDocument.URI, params.Position, s.index.FindDefinition)
 }
 
