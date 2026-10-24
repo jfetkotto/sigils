@@ -367,6 +367,7 @@ func (s *Service) Diagnostics() (map[string][]diag.Diagnostic, uint64) {
 		set.AddAll(s.comp.Diagnostics())
 		set.AddAll(s.model.Diagnostics())
 		set.AddAll(s.model.CheckStatements())
+		set.AddAll(s.model.CheckNames())
 		// Elaboration finds what only the instance tree shows: modules that
 		// are not defined, port and parameter mismatches. It is bounded so a
 		// pathological design cannot stall the pass.
