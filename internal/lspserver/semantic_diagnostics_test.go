@@ -1,6 +1,7 @@
 package lspserver
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -167,4 +168,98 @@ func TestLintSettings(t *testing.T) {
 	if bad == nil || len(bad.Rules) != 0 {
 		t.Errorf("an invalid setting should fall back to the defaults, got %+v", bad)
 	}
+}
+
+// scopedHarness is a server that takes the scoped path as soon as it has done
+// one full pass, and brings the full pass back after a short quiet time.
+func scopedHarness(t *testing.T) *semanticHarness {
+	h := newSemanticHarness(t)
+	h.s.semScopedAfter = 0
+	h.s.semFullDelay = 60 * time.Millisecond
+	return h
+}
+
+func TestScopedPassUpdatesOnlyTheChangedFile(t *testing.T) {
+	h := scopedHarness(t)
+	h.set(t, "file:///a.sv", "module a(input x);\n  assign x = 1'b0;\nendmodule\n")
+	h.set(t, "file:///b.sv", "module b(input y);\n  assign y = 1'b0;\nendmodule\n")
+	// Both files have the assign-to-input error after the first (full) passes.
+	for _, uri := range []string{"file:///a.sv", "file:///b.sv"} {
+		if got := h.diagnostics(uri); len(got) != 1 {
+			t.Fatalf("%s: %+v", uri, got)
+		}
+	}
+	h.wait(t) // the full pass that follows the scoped one for b.sv
+	h.s.mu.Lock()
+	full := h.s.semHaveFull
+	h.s.mu.Unlock()
+	if !full {
+		t.Fatal("no full pass recorded")
+	}
+
+	// Fix a.sv only: its error clears from the scoped pass, b.sv is left as it is.
+	h.s.publishDiagnostics(h.s.index.SetFile("file:///a.sv", "module a(output x);\n  assign x = 1'b0;\nendmodule\n"))
+	h.wait(t)
+	if got := h.diagnostics("file:///a.sv"); len(got) != 0 {
+		t.Fatalf("a.sv should be clean, got %+v", got)
+	}
+	if got := h.diagnostics("file:///b.sv"); len(got) != 1 {
+		t.Fatalf("b.sv should keep its error, got %+v", got)
+	}
+	h.wait(t) // the full pass
+}
+
+// A change in one file can fix a problem in another; the scoped pass leaves
+// that other file alone and the full pass that follows corrects it.
+func TestFullPassFollowsAScopedOneAndRefreshesOtherFiles(t *testing.T) {
+	h := scopedHarness(t)
+	h.set(t, "file:///top.sv", "module top;\n  leaf u();\nendmodule\n")
+	if got := h.diagnostics("file:///top.sv"); len(got) == 0 {
+		t.Fatal("expected unknown module while leaf is undefined")
+	}
+	h.s.publishDiagnostics(h.s.index.SetFile("file:///leaf.sv", "module leaf;\nendmodule\n"))
+	h.wait(t) // scoped: leaf.sv only
+	h.wait(t) // full: top.sv refreshed
+	if got := h.diagnostics("file:///top.sv"); len(got) != 0 {
+		t.Fatalf("top.sv should be clean after the full pass, got %+v", got)
+	}
+}
+
+func TestSmallWorkspacesKeepTheFullPass(t *testing.T) {
+	h := newSemanticHarness(t) // the default threshold: a tiny workspace is fast
+	h.set(t, "file:///a.sv", "module a(input x);\n  assign x = 1'b0;\nendmodule\n")
+	h.s.publishDiagnostics(h.s.index.SetFile("file:///a.sv", "module a(output x);\n  assign x = 1'b0;\nendmodule\n"))
+	h.wait(t)
+	h.s.mu.Lock()
+	pending := h.s.semFullPending
+	h.s.mu.Unlock()
+	if pending {
+		t.Fatal("a fast workspace should not arm a follow-up full pass")
+	}
+}
+
+// While a big workspace is first indexed every file counts as changed; the
+// first pass answers for the open documents, then the full pass follows.
+func TestFirstPassOfABigWorkspaceAnswersForOpenDocumentsFirst(t *testing.T) {
+	h := newSemanticHarness(t)
+	h.s.semanticDebounce = 300 * time.Millisecond // indexing finishes well inside it
+	h.s.semFullDelay = 60 * time.Millisecond
+	openText(t, h.s, "file:///open.sv", "module open_m(input x);\n  assign x = 1'b0;\nendmodule\n")
+	var touched []string
+	touched = append(touched, h.s.index.SetFile("file:///open.sv", "module open_m(input x);\n  assign x = 1'b0;\nendmodule\n")...)
+	for i := 0; i < bootstrapFiles+10; i++ {
+		touched = append(touched, h.s.index.SetFile(fmt.Sprintf("file:///f%03d.sv", i), fmt.Sprintf("module m%03d(input a, output b);\n  assign b = a;\nendmodule\n", i))...)
+	}
+	h.s.publishDiagnostics(touched)
+	h.wait(t)
+	if got := h.diagnostics("file:///open.sv"); len(got) != 1 {
+		t.Fatalf("the open document should be answered first, got %+v", got)
+	}
+	h.s.mu.Lock()
+	pending := h.s.semFullPending
+	h.s.mu.Unlock()
+	if !pending {
+		t.Fatal("the first pass should have been the scoped one, with the full pass armed")
+	}
+	h.wait(t) // the full pass
 }

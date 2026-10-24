@@ -38,6 +38,8 @@ A `.sigils.json` file at the workspace root marks the root (the same way `.git` 
 
 Semantic diagnostics (unresolved modules, illegal assignments and drivers, duplicate definitions, and the other checks svparse's semantic model makes) are published a moment after the last edit, in addition to the immediate syntax errors. A file that does not parse shows only its syntax errors. To keep syntax errors only, set `"semanticDiagnostics": false`.
 
+On a large workspace (where the whole pass takes more than about 0.3 s) a change is analysed for the changed file only, so its errors and lint findings appear in about a second on a million-line design; the whole workspace is re-checked about two seconds after you stop typing, which refreshes other files the change affected. When a big workspace is first opened, the open files are answered before the rest.
+
 svparse's lint rules (unused and undriven signals, latch inference, blocking assignments in sequential blocks, width truncation, overlapping drivers, and so on) are published with them, as warnings or hints. Tune them in the same file, using the rule names from `svparse lint --list-rules`:
 
 ```json

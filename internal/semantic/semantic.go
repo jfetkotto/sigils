@@ -54,9 +54,14 @@ type Service struct {
 	nav    *navIndex // see navigate.go
 	navGen uint64
 
-	diags    map[string][]diag.Diagnostic // by file, for generation diagGen
+	diags    map[string][]diag.Diagnostic // by file, for generation diagsGen
 	diagsGen uint64
 	diagsOK  bool
+
+	// design is the elaboration for generation designGen, with its problems.
+	design      *elab.Design
+	designDiags []diag.Diagnostic
+	designGen   uint64
 }
 
 // New returns a Service reading its trees from source.
@@ -382,32 +387,74 @@ func (s *Service) Diagnostics() (map[string][]diag.Diagnostic, uint64) {
 	defer s.mu.Unlock()
 	s.fileLocked("") // rebuild if the workspace changed
 	if !s.diagsOK {
-		var set diag.Set
-		set.AddAll(s.comp.Diagnostics())
-		set.AddAll(s.model.Diagnostics())
-		set.AddAll(s.model.CheckStatements())
-		set.AddAll(s.model.CheckNames())
-		// Elaboration finds what only the instance tree shows: modules that
-		// are not defined, port and parameter mismatches. It is bounded so a
-		// pathological design cannot stall the pass.
-		ctx, cancel := context.WithTimeout(context.Background(), elaborationBudget)
-		design, elabDiags := elab.Elaborate(ctx, s.comp, elab.Options{})
-		set.AddAll(elabDiags)
-		if s.lint != nil {
-			set.AddAll(lint.Run(ctx, lint.Input{Comp: s.comp, Design: design, Comments: s.directives}, *s.lint))
-		}
-		cancel()
-		byFile := map[string][]diag.Diagnostic{}
-		for _, d := range set.Sorted() {
-			switch d.Code {
-			case diag.CodeSyntaxError, diag.CodePreprocessorError:
-				continue // the index reports these
-			}
-			byFile[d.Range.File] = append(byFile[d.Range.File], d)
-		}
-		s.diags, s.diagsGen, s.diagsOK = byFile, s.gen, true
+		s.diags, s.diagsGen, s.diagsOK = s.computeLocked(nil), s.gen, true
 	}
 	return s.diags, s.diagsGen
+}
+
+// DiagnosticsFor is Diagnostics limited to the files in files: the problems in
+// those files only, with an (empty) entry for each so a caller can tell a file
+// that became clean. It does the work for those files alone, apart from
+// elaborating the design (which it keeps for the generation, so a later full
+// pass does not repeat it): a change to one file of a large workspace is
+// answered in a fraction of the time of the whole workspace. A change can
+// alter problems in other files too (a port renamed breaks its instances);
+// those are found by the next Diagnostics.
+func (s *Service) DiagnosticsFor(files map[string]bool) (byFile map[string][]diag.Diagnostic, gen uint64) {
+	defer func() {
+		if recover() != nil {
+			byFile, gen = nil, 0
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fileLocked("")
+	byFile = s.computeLocked(files)
+	for f := range files {
+		if _, ok := byFile[f]; !ok {
+			byFile[f] = nil
+		}
+	}
+	return byFile, s.gen
+}
+
+// computeLocked runs the checks over files (all, if nil) and groups what they
+// find by file.
+func (s *Service) computeLocked(files map[string]bool) map[string][]diag.Diagnostic {
+	var set diag.Set
+	want := func(ds []diag.Diagnostic) {
+		for _, d := range ds {
+			if files == nil || files[d.Range.File] {
+				set.Add(d)
+			}
+		}
+	}
+	want(s.comp.Diagnostics())
+	want(s.model.Diagnostics())
+	set.AddAll(s.model.CheckStatementsIn(files))
+	set.AddAll(s.model.CheckNamesIn(files))
+	// Elaboration finds what only the instance tree shows: modules that are not
+	// defined, port and parameter mismatches. It is bounded so a pathological
+	// design cannot stall the pass.
+	ctx, cancel := context.WithTimeout(context.Background(), elaborationBudget)
+	defer cancel()
+	if s.design == nil || s.designGen != s.gen {
+		design, ds := elab.Elaborate(ctx, s.comp, elab.Options{})
+		s.design, s.designDiags, s.designGen = design, ds, s.gen
+	}
+	want(s.designDiags)
+	if s.lint != nil {
+		set.AddAll(lint.Run(ctx, lint.Input{Comp: s.comp, Design: s.design, Comments: s.directives, Files: files}, *s.lint))
+	}
+	byFile := map[string][]diag.Diagnostic{}
+	for _, d := range set.Sorted() {
+		switch d.Code {
+		case diag.CodeSyntaxError, diag.CodePreprocessorError:
+			continue // the index reports these
+		}
+		byFile[d.Range.File] = append(byFile[d.Range.File], d)
+	}
+	return byFile
 }
 
 // SetLint turns lint findings in Diagnostics on, with cfg, or off with nil.

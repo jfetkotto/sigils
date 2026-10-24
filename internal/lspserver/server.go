@@ -63,6 +63,21 @@ type Server struct {
 	semanticDebounce time.Duration
 	semanticDone     func()
 
+	// The semantic pass has two forms (see refreshSemantic): a full one over
+	// the workspace and a scoped one over the files changed since the last
+	// pass. semDirty holds those files; semLastFull is how long the last full
+	// pass took, and the scoped form is used once that exceeds semScopedAfter;
+	// semFullTimer brings the full pass back semFullDelay after the last edit
+	// (semFullPending says it is armed), semForceFull makes the next pass full.
+	semDirty       map[string]bool
+	semLastFull    time.Duration
+	semHaveFull    bool
+	semForceFull   bool
+	semFullPending bool
+	semFullTimer   *time.Timer
+	semFullDelay   time.Duration
+	semScopedAfter time.Duration
+
 	// tokMu guards tokens, the lexed form of each open document -- see
 	// tokensFor.
 	tokMu  sync.Mutex
@@ -88,6 +103,9 @@ func NewServer(log commonlog.Logger) *Server {
 		semDiags:  make(map[string][]shownDiagnostic),
 
 		semanticDebounce: defaultSemanticDebounce,
+		semDirty:         make(map[string]bool),
+		semFullDelay:     defaultSemanticFullDelay,
+		semScopedAfter:   defaultScopedAfter,
 		tokens:           make(map[string]cachedTokens),
 
 		watchDebounce: defaultWatchDebounce,

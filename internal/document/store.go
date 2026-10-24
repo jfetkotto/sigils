@@ -70,6 +70,17 @@ func (s *Store) Get(uri URI) (Document, bool) {
 	return *doc, true
 }
 
+// URIs returns the open documents, in no particular order.
+func (s *Store) URIs() []URI {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]URI, 0, len(s.docs))
+	for uri := range s.docs {
+		out = append(out, uri)
+	}
+	return out
+}
+
 // Len reports how many documents are open.
 func (s *Store) Len() int {
 	s.mu.RLock()
