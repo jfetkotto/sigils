@@ -23,6 +23,9 @@ func (s *Server) TextDocumentReferences(_ *glsp.Context, params *protocol.Refere
 	}
 	line, character := int(params.Position.Line), int(params.Position.Character)
 
+	if locs, ok := s.semanticReferences(params.TextDocument.URI, params.Position, params.Context.IncludeDeclaration); ok {
+		return locs, nil
+	}
 	word, start, ok := sv.WordAt(text, line, character)
 	if !ok {
 		return nil, nil

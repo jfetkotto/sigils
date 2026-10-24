@@ -390,3 +390,31 @@ func BenchmarkHoverAfterEdit(b *testing.B) {
 		}
 	}
 }
+
+// Semantic go-to-definition straight after an edit: the first request builds
+// the model and the navigation index of the whole workspace.
+func BenchmarkSemanticDefinitionAfterEdit(b *testing.B) {
+	s, probe := benchWorkspace(b)
+	on := true
+	s.cfg.SemanticNavigation = &on
+	pos := benchPos(b, benchModule(0), "ckSideband")
+	pos.Character += 2
+	params := &protocol.DefinitionParams{TextDocumentPositionParams: benchTextDocPos(probe, pos)}
+	texts := [2]string{benchModule(0), benchModule(0) + "\n"}
+	b.ResetTimer()
+	for i := range b.N {
+		change := &protocol.DidChangeTextDocumentParams{
+			TextDocument: protocol.VersionedTextDocumentIdentifier{
+				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri(probe)},
+				Version:                int32(i + 2),
+			},
+			ContentChanges: []any{protocol.TextDocumentContentChangeEventWhole{Text: texts[i%2]}},
+		}
+		if err := s.TextDocumentDidChange(nil, change); err != nil {
+			b.Fatal(err)
+		}
+		if res, err := s.TextDocumentDefinition(nil, params); err != nil || res == nil {
+			b.Fatalf("definition = %v, %v", res, err)
+		}
+	}
+}

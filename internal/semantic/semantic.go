@@ -51,6 +51,9 @@ type Service struct {
 	// lint, if set, makes Diagnostics include the lint findings.
 	lint *lint.Config
 
+	nav    *navIndex // see navigate.go
+	navGen uint64
+
 	diags    map[string][]diag.Diagnostic // by file, for generation diagGen
 	diagsGen uint64
 	diagsOK  bool

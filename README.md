@@ -49,6 +49,8 @@ svparse's lint rules (unused and undriven signals, latch inference, blocking ass
 
 `"lint": {"enabled": false}` turns them off. A single finding can be silenced in the source with `// svparse: disable=<rule>` (this line), `disable-next-line=<rule>` or `disable-file=<rule>`. Lint stops with the semantic diagnostics when `"semanticDiagnostics": false`.
 
+Go-to-definition and find-references can be answered from svparse's semantic model, which resolves names through scopes, imports, packages, instance ports and parameters and class members instead of by spelling, and tells apart same-named symbols (a local shadowing a port, one signal name in two modules). It is off by default; turn it on with `"semanticNavigation": true`. Where the model has no answer (a file that does not parse, an `import` line) the lexical lookup answers as before. The first request after an edit rebuilds the index of the whole workspace (about 11 ms on the benchmark workspace). Rename stays lexical.
+
 Each filelist entry may itself point at other filelists (nested, resolved recursively) or at source files directly. If no `.sigils.json` is found above the files you open, `sigils` still runs. It just has nothing indexed beyond whatever's currently open in the editor.
 
 ## Limitations

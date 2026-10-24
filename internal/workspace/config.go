@@ -27,6 +27,14 @@ type Config struct {
 	// in the index may prefer the syntax errors alone.
 	SemanticDiagnostics *bool `json:"semanticDiagnostics,omitempty"`
 
+	// SemanticNavigation makes go-to-definition and find-references answer
+	// from svparse's semantic model (scopes, imports, instance ports and
+	// parameters) instead of by lexical lookup, falling back to the lexical
+	// answer where the model has none. Off unless true: the lexical lookup
+	// works on any text, including a file that is mid-edit, while the model
+	// only resolves what parses.
+	SemanticNavigation *bool `json:"semanticNavigation,omitempty"`
+
 	// Lint tunes the lint rules, which run with the semantic diagnostics
 	// (so they stop with them). Absent, every rule runs at its default
 	// severity.
@@ -41,6 +49,12 @@ type LintSettings struct {
 	Enabled *bool             `json:"enabled,omitempty"`
 	Rules   map[string]string `json:"rules,omitempty"`
 	Ignore  []string          `json:"ignore,omitempty"`
+}
+
+// SemanticNavigationEnabled reports whether definition and references use the
+// semantic model first.
+func (c Config) SemanticNavigationEnabled() bool {
+	return c.SemanticNavigation != nil && *c.SemanticNavigation
 }
 
 // LintEnabled reports whether lint findings are published.
