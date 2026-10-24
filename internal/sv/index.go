@@ -279,6 +279,16 @@ type Index struct {
 	astGen uint64
 	// directives[uri] are the lint directive comments of uri's last scan.
 	directives map[string][]preprocessor.Comment
+	// structure[uri] is uri's own processes and generate constructs.
+	structure map[string][]Structure
+}
+
+// FileStructure returns the processes and generate constructs of uri, in
+// source order. The slice is shared and must not be modified.
+func (ix *Index) FileStructure(uri string) []Structure {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.structure[uri]
 }
 
 // NewIndex returns an empty Index.
@@ -303,6 +313,7 @@ func NewIndex() *Index {
 		containerOf:        make(map[string][]ownedLink),
 		asts:               make(map[string]*ast.File),
 		directives:         make(map[string][]preprocessor.Comment),
+		structure:          make(map[string][]Structure),
 	}
 }
 
@@ -411,6 +422,7 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 
 	if res.File != nil {
 		ix.asts[uri] = res.File
+		ix.structure[uri] = res.Structure
 		if len(res.Directives) > 0 {
 			ix.directives[uri] = res.Directives
 		} else {
@@ -671,6 +683,7 @@ func (ix *Index) removeLocked(uri string) []string {
 	ix.clearScanBucketsLocked(uri)
 	if _, ok := ix.asts[uri]; ok {
 		delete(ix.asts, uri)
+		delete(ix.structure, uri)
 		delete(ix.directives, uri)
 		ix.astGen++
 	}

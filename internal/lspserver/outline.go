@@ -1,6 +1,8 @@
 package lspserver
 
 import (
+	"slices"
+
 	"github.com/tliron/glsp"
 	protocol "github.com/tliron/glsp/protocol_3_16"
 
@@ -12,7 +14,12 @@ import (
 // all), with no extra scanning.
 func (s *Server) TextDocumentDocumentSymbol(_ *glsp.Context, params *protocol.DocumentSymbolParams) (any, error) {
 	decls := s.index.FileDeclarations(params.TextDocument.URI)
-	tree := documentSymbolTree(decls, childIndex(decls), -1)
+	var tree []protocol.DocumentSymbol
+	if structure := s.index.FileStructure(params.TextDocument.URI); len(structure) > 0 {
+		tree = outlineTree(decls, structure)
+	} else {
+		tree = documentSymbolTree(decls, childIndex(decls), -1)
+	}
 	if len(tree) == 0 {
 		return nil, nil
 	}
@@ -157,4 +164,159 @@ func nameRange(line, character int, name string) protocol.Range {
 	start := position(line, character)
 	end := position(line, character+sv.UTF16Len(name))
 	return protocol.Range{Start: start, End: end}
+}
+
+// outlineTree is documentSymbolTree for a file that also has processes and
+// generate constructs (see sv.Structure). They are merged into the declaration
+// tree by range: a structure sits under the smallest structure, or failing
+// that the innermost container declaration, that contains it, and a
+// declaration sits under the innermost structure that contains it, within its
+// own container. Declaration.Parent is left alone, since scope lookups depend
+// on it (a signal declared in a generate block is still the module's, as far
+// as name resolution goes).
+func outlineTree(decls []sv.Declaration, structure []sv.Structure) []protocol.DocumentSymbol {
+	n := len(decls)
+	total := n + len(structure)
+	less := func(l1, c1, l2, c2 int) bool { return l1 < l2 || (l1 == l2 && c1 < c2) }
+	within := func(s *sv.Structure, line, character int) bool {
+		return !less(line, character, s.Line, s.Character) && less(line, character, s.EndLine, s.EndCharacter)
+	}
+
+	// structure is in source order and properly nested, so the stack finds each
+	// one's enclosing structure.
+	sParent := make([]int, len(structure))
+	var stack []int
+	for j := range structure {
+		for len(stack) > 0 && !within(&structure[stack[len(stack)-1]], structure[j].Line, structure[j].Character) {
+			stack = stack[:len(stack)-1]
+		}
+		sParent[j] = -1
+		if len(stack) > 0 {
+			sParent[j] = stack[len(stack)-1]
+		}
+		stack = append(stack, j)
+	}
+	innermost := func(line, character int) int {
+		lo, hi := 0, len(structure) // the last structure starting at or before the position
+		for lo < hi {
+			mid := (lo + hi) / 2
+			if less(line, character, structure[mid].Line, structure[mid].Character) {
+				hi = mid
+			} else {
+				lo = mid + 1
+			}
+		}
+		for j := lo - 1; j >= 0; j = sParent[j] {
+			if within(&structure[j], line, character) {
+				return j
+			}
+		}
+		return -1
+	}
+
+	var containers []int
+	for i := range decls {
+		if sv.IsContainer(decls[i].Kind) {
+			containers = append(containers, i)
+		}
+	}
+	containerOf := func(line, character int) int {
+		best := -1
+		for _, i := range containers {
+			d := &decls[i]
+			if !less(line, character, d.Line, d.Character) && less(line, character, d.EndLine, d.EndCharacter) {
+				if best == -1 || less(decls[best].Line, decls[best].Character, d.Line, d.Character) {
+					best = i
+				}
+			}
+		}
+		return best
+	}
+
+	children := make([][]int, total)
+	var roots []int
+	attach := func(item, parent int) {
+		if parent == -1 {
+			roots = append(roots, item)
+		} else {
+			children[parent] = append(children[parent], item)
+		}
+	}
+	for i := range decls {
+		parent := decls[i].Parent
+		if parent < 0 || parent >= n || parent == i {
+			parent = -1
+		}
+		if j := innermost(decls[i].Line, decls[i].Character); j != -1 && parent != -1 &&
+			!less(structure[j].Line, structure[j].Character, decls[parent].Line, decls[parent].Character) {
+			parent = n + j
+		}
+		attach(i, parent)
+	}
+	for j := range structure {
+		parent := -1
+		if sParent[j] != -1 {
+			parent = n + sParent[j]
+		} else if c := containerOf(structure[j].Line, structure[j].Character); c != -1 {
+			parent = c
+		}
+		attach(n+j, parent)
+	}
+
+	pos := func(item int) (int, int) {
+		if item < n {
+			return decls[item].Line, decls[item].Character
+		}
+		return structure[item-n].Line, structure[item-n].Character
+	}
+	order := func(items []int) {
+		slices.SortStableFunc(items, func(a, b int) int {
+			la, ca := pos(a)
+			lb, cb := pos(b)
+			if la != lb {
+				return la - lb
+			}
+			return ca - cb
+		})
+	}
+	var build func(items []int) []protocol.DocumentSymbol
+	build = func(items []int) []protocol.DocumentSymbol {
+		order(items)
+		out := make([]protocol.DocumentSymbol, 0, len(items))
+		for _, item := range items {
+			if item < n {
+				d := &decls[item]
+				out = append(out, protocol.DocumentSymbol{
+					Name:           d.Name,
+					Kind:           symbolKindFor(d.Kind),
+					Range:          protocol.Range{Start: position(d.Line, d.Character), End: position(d.EndLine, d.EndCharacter)},
+					SelectionRange: nameRange(d.Line, d.Character, d.Name),
+					Children:       build(children[item]),
+				})
+				continue
+			}
+			s := &structure[item-n]
+			kind := protocol.SymbolKindNamespace
+			if s.Kind == sv.StructProcess {
+				kind = protocol.SymbolKindEvent
+			}
+			var detail *string
+			if s.Detail != "" {
+				detail = &s.Detail
+			}
+			out = append(out, protocol.DocumentSymbol{
+				Name:           s.Name,
+				Detail:         detail,
+				Kind:           kind,
+				Range:          protocol.Range{Start: position(s.Line, s.Character), End: position(s.EndLine, s.EndCharacter)},
+				SelectionRange: protocol.Range{Start: position(s.Line, s.Character), End: position(s.Line, s.Character+s.KeywordLen)},
+				Children:       build(children[item]),
+			})
+		}
+		if len(out) == 0 {
+			return nil
+		}
+		return out
+	}
+	return build(roots)
 }
