@@ -150,7 +150,7 @@ func (s *Service) assignmentContext(at found) map[ast.Expr]sema.BoundExpr {
 		return nil
 	}
 	lhs, _ := s.model.Bind(at.scope, at.assign.LHS)
-	if lhs == nil || lhs.Type() == nil {
+	if lhs.Type() == nil {
 		return nil
 	}
 	rhs, _ := s.model.BindAssign(at.scope, lhs.Type(), at.assign.RHS)
@@ -167,13 +167,6 @@ func (s *Service) assignmentContext(at found) map[ast.Expr]sema.BoundExpr {
 		return true
 	})
 	return byExpr
-}
-
-func lastOf(path []ast.Expr) ast.Expr {
-	if len(path) == 0 {
-		return nil
-	}
-	return path[len(path)-1]
 }
 
 // fileLocked returns uri's tree, rebuilding the model if the workspace
@@ -224,7 +217,7 @@ func (s *Service) symbol(scope *sema.Scope, name string) (*Entry, bool) {
 // expr describes an expression bound in scope.
 func (s *Service) expr(scope *sema.Scope, x ast.Expr, ctx map[ast.Expr]sema.BoundExpr) (*Entry, bool) {
 	be, _ := s.model.Bind(scope, x)
-	if be == nil || be.Type() == nil || be.Type().String() == invalidType {
+	if be.Type() == nil || be.Type().String() == invalidType {
 		return nil, false
 	}
 	e := &Entry{Text: ast.ExprString(x)}
