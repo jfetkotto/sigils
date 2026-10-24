@@ -44,3 +44,20 @@ func TestLoadConfigInvalidJSON(t *testing.T) {
 		t.Fatalf("expected an error for invalid JSON")
 	}
 }
+
+func TestSemanticDiagnosticsDefaultOnAndCanBeDisabled(t *testing.T) {
+	if !(Config{}).SemanticDiagnosticsEnabled() {
+		t.Fatal("semantic diagnostics should default to on")
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, ConfigFileName), []byte(`{"semanticDiagnostics": false}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadConfig(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.SemanticDiagnosticsEnabled() {
+		t.Fatal("semanticDiagnostics:false should turn them off")
+	}
+}

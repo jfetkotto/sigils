@@ -302,6 +302,14 @@ func NewIndex() *Index {
 	}
 }
 
+// ASTGeneration is the generation ASTs would return, without building the
+// list.
+func (ix *Index) ASTGeneration() uint64 {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	return ix.astGen
+}
+
 // ASTs returns the parse tree of every scanned file in URI order, and a
 // generation number that changes whenever any of them does. Trees are
 // shared with the index and must not be modified.

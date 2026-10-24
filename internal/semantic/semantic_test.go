@@ -103,3 +103,25 @@ func TestRebuildsWhenGenerationChanges(t *testing.T) {
 		t.Fatalf("a=%+v b=%+v", a.Expr, b.Expr)
 	}
 }
+
+func TestDiagnosticsGroupedByFile(t *testing.T) {
+	s := serviceFor(t, "file:///d.sv", "module m(input a);\n  assign a = 1'b0;\nendmodule\nmodule top;\n  nothere u();\nendmodule\n")
+	byFile, gen := s.Diagnostics()
+	if gen != 1 {
+		t.Fatalf("generation %d", gen)
+	}
+	codes := map[string]bool{}
+	for _, d := range byFile["file:///d.sv"] {
+		codes[d.Code] = true
+	}
+	if !codes["assign-to-input"] || !codes["unknown-module"] || len(byFile) != 1 {
+		t.Fatalf("got %+v", byFile)
+	}
+}
+
+func TestDiagnosticsOfACleanDesignAreEmpty(t *testing.T) {
+	s := serviceFor(t, "file:///c.sv", "module leaf(input a, output b);\n  assign b = a;\nendmodule\nmodule top(input x, output y);\n  leaf u(.a(x), .b(y));\nendmodule\n")
+	if byFile, _ := s.Diagnostics(); len(byFile) != 0 {
+		t.Fatalf("got %+v", byFile)
+	}
+}

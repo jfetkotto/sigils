@@ -146,6 +146,9 @@ func (s *Server) Shutdown(_ *glsp.Context) error {
 	s.mu.Lock()
 	s.shutdownReceived = true
 	cancel := s.watchCancel
+	if s.semTimer != nil {
+		s.semTimer.Stop()
+	}
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()

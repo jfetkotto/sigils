@@ -20,6 +20,17 @@ type Config struct {
 	// (e.g. "products/Spu/SpuTO1/abc/top.f"). See Discoverer for how
 	// they get resolved.
 	Filelists []string `json:"filelists"`
+
+	// SemanticDiagnostics turns the semantic checks (unresolved names,
+	// illegal assignments, duplicate definitions and so on) on or off. They
+	// are on unless this is false: a workspace whose dependencies are not all
+	// in the index may prefer the syntax errors alone.
+	SemanticDiagnostics *bool `json:"semanticDiagnostics,omitempty"`
+}
+
+// SemanticDiagnosticsEnabled reports whether semantic diagnostics are on.
+func (c Config) SemanticDiagnosticsEnabled() bool {
+	return c.SemanticDiagnostics == nil || *c.SemanticDiagnostics
 }
 
 // LoadConfig reads .sigils.json from root. A missing config file is not an
