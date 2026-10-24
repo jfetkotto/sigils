@@ -30,24 +30,23 @@ func (s *Server) TextDocumentHover(_ *glsp.Context, params *protocol.HoverParams
 	}
 	line, character := int(params.Position.Line), int(params.Position.Character)
 
+	uri := params.TextDocument.URI
 	word, start, ok := sv.WordAt(text, line, character)
 	if !ok {
-		return nil, nil
+		// Not on an identifier (a number, an operator): there is no
+		// declaration to show, but the expression still has a meaning.
+		return s.hoverResult(uri, line, character, "", ""), nil
 	}
 
 	toks := s.tokensFor(params.TextDocument.URI, text) // shared by both probes below -- see sv.Tokens
 	if moduleName, ok := sv.InstantiationPortNameIn(toks, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
-			return &protocol.Hover{
-				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
-			}, nil
+			return s.hoverResult(uri, line, character, word, s.hoverContents(decl)), nil
 		}
 	}
 	if moduleName, ok := sv.InstantiationParamNameIn(toks, line, word, start); ok {
 		if decl, ok := s.index.InstantiationPortInfo(moduleName, word); ok {
-			return &protocol.Hover{
-				Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
-			}, nil
+			return s.hoverResult(uri, line, character, word, s.hoverContents(decl)), nil
 		}
 	}
 
@@ -55,7 +54,7 @@ func (s *Server) TextDocumentHover(_ *glsp.Context, params *protocol.HoverParams
 		recvQualifier, recvHasQualifier := sv.QualifierAt(text, line, receiverStart)
 		if recv, ok := s.index.HoverInfo(params.TextDocument.URI, line, character, receiver, recvQualifier, recvHasQualifier); ok {
 			if hover, ok := s.memberHover(&recv, word); ok {
-				return hover, nil
+				return s.withSemantic(hover, uri, line, character, word), nil
 			}
 		}
 	}
@@ -64,12 +63,44 @@ func (s *Server) TextDocumentHover(_ *glsp.Context, params *protocol.HoverParams
 
 	decl, ok := s.index.HoverInfo(params.TextDocument.URI, line, character, word, qualifier, hasQualifier)
 	if !ok {
-		return nil, nil
+		return s.hoverResult(uri, line, character, word, ""), nil
 	}
 
-	return &protocol.Hover{
-		Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: s.hoverContents(decl)},
-	}, nil
+	return s.hoverResult(uri, line, character, word, s.hoverContents(decl)), nil
+}
+
+// hoverResult is the hover for declaration, the index's rendering of what
+// the name was declared as (empty when the index does not know it), followed
+// by the semantic model's reading of the same position: the resolved type,
+// width and constant value of the name or expression under the cursor. The
+// two answer different questions (what was written, what it means), so both
+// are shown. It returns nil when there is nothing to say.
+func (s *Server) hoverResult(uri string, line, character int, word, declaration string) *protocol.Hover {
+	var hover *protocol.Hover
+	if declaration != "" {
+		hover = &protocol.Hover{Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: declaration}}
+	}
+	return s.withSemantic(hover, uri, line, character, word)
+}
+
+// withSemantic appends the semantic section to hover, creating the hover if
+// there is only the semantic part.
+func (s *Server) withSemantic(hover *protocol.Hover, uri string, line, character int, word string) *protocol.Hover {
+	info, ok := s.sem.Describe(uri, line, character, word)
+	if !ok {
+		return hover
+	}
+	section := info.Markdown()
+	if section == "" {
+		return hover
+	}
+	if hover == nil {
+		return &protocol.Hover{Contents: protocol.MarkupContent{Kind: protocol.MarkupKindMarkdown, Value: section}}
+	}
+	content := hover.Contents.(protocol.MarkupContent)
+	content.Value += "\n\n---\n\n" + section
+	hover.Contents = content
+	return hover
 }
 
 // memberHover renders hover text for "receiver.word", given receiver's own

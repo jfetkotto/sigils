@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/jfetkotto/svparse/v2/ast"
 	"github.com/jfetkotto/svparse/v2/lexer"
 )
 
@@ -268,6 +269,13 @@ type Index struct {
 	// initialMacros seeds every SetFile call's preprocessing -- see
 	// SetInitialMacros.
 	initialMacros map[string]string
+
+	// asts[uri] is the parse tree of uri's own last scan, kept so the
+	// semantic layer can analyse the workspace without parsing it a second
+	// time. astGen counts changes to the set, so a consumer can tell when
+	// what it built from an earlier ASTs() snapshot is stale.
+	asts   map[string]*ast.File
+	astGen uint64
 }
 
 // NewIndex returns an empty Index.
@@ -290,7 +298,26 @@ func NewIndex() *Index {
 		contributorsOf:     make(map[string]map[string]bool),
 		membersOf:          make(map[declRef][]ownedLink),
 		containerOf:        make(map[string][]ownedLink),
+		asts:               make(map[string]*ast.File),
 	}
+}
+
+// ASTs returns the parse tree of every scanned file in URI order, and a
+// generation number that changes whenever any of them does. Trees are
+// shared with the index and must not be modified.
+func (ix *Index) ASTs() ([]*ast.File, uint64) {
+	ix.mu.RLock()
+	defer ix.mu.RUnlock()
+	uris := make([]string, 0, len(ix.asts))
+	for uri := range ix.asts {
+		uris = append(uris, uri)
+	}
+	slices.Sort(uris)
+	files := make([]*ast.File, len(uris))
+	for i, uri := range uris {
+		files[i] = ix.asts[uri]
+	}
+	return files, ix.astGen
 }
 
 // Diagnostics returns every preprocessing/parsing problem recorded during
@@ -362,6 +389,10 @@ func (ix *Index) SetFile(uri string, text string) (touchedURIs []string) {
 	ix.mu.Lock()
 	defer ix.mu.Unlock()
 
+	if res.File != nil {
+		ix.asts[uri] = res.File
+		ix.astGen++
+	}
 	touched := make(map[string]bool, len(declsByURI)+len(diagsByURI))
 	for fileURI, decls := range declsByURI {
 		touched[fileURI] = true
@@ -613,6 +644,10 @@ func (ix *Index) removeLocked(uri string) []string {
 		}
 	}
 	ix.clearScanBucketsLocked(uri)
+	if _, ok := ix.asts[uri]; ok {
+		delete(ix.asts, uri)
+		ix.astGen++
+	}
 	ix.removeOccurrencesLocked(uri)
 	ix.recordMemberLinksLocked(uri, nil)
 	ix.recordDependenciesLocked(uri, nil)

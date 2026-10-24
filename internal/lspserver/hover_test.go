@@ -364,7 +364,7 @@ func TestTextDocumentHoverPlainVariableShowsTypeNoExpansion(t *testing.T) {
 		t.Fatalf("TextDocumentHover: %v", err)
 	}
 	content, _ := hover.Contents.(protocol.MarkupContent)
-	if content.Value != "```systemverilog\nlogic [7:0] data\n```" {
+	if declarationPart(content.Value) != "```systemverilog\nlogic [7:0] data\n```" {
 		t.Fatalf("expected a plain (non-struct) variable's hover to show only its own type with no expansion, got %q", content.Value)
 	}
 }
@@ -399,7 +399,7 @@ func TestTextDocumentHoverStructFieldResolvesThroughReceiverType(t *testing.T) {
 		t.Fatalf("expected a hover result")
 	}
 	content, _ := hover.Contents.(protocol.MarkupContent)
-	if content.Value != "```systemverilog\nlogic [3:0] addr\n```" {
+	if declarationPart(content.Value) != "```systemverilog\nlogic [3:0] addr\n```" {
 		t.Fatalf("expected hover on \"link.addr\" to resolve to bus_t's own addr field, got %q", content.Value)
 	}
 }
@@ -429,7 +429,7 @@ func TestTextDocumentHoverPlainShadowedNameStillResolvesToLocalDeclaration(t *te
 		t.Fatalf("TextDocumentHover: %v", err)
 	}
 	content, _ := hover.Contents.(protocol.MarkupContent)
-	if content.Value != "```systemverilog\nint addr\n```" {
+	if declarationPart(content.Value) != "```systemverilog\nint addr\n```" {
 		t.Fatalf("expected the plain (non-dotted) \"addr\" to still resolve to the local int variable, got %q", content.Value)
 	}
 }
@@ -498,7 +498,7 @@ func TestTextDocumentHoverInterfaceMemberResolvesThroughReceiverType(t *testing.
 		t.Fatalf("expected a hover result")
 	}
 	content, _ := hover.Contents.(protocol.MarkupContent)
-	if content.Value != "```systemverilog\nlogic [31:0] hAddr\n```" {
+	if declarationPart(content.Value) != "```systemverilog\nlogic [31:0] hAddr\n```" {
 		t.Fatalf("expected hover on \"uin_Bus.hAddr\" to resolve to in_bus's own hAddr signal, got %q", content.Value)
 	}
 }
@@ -1015,5 +1015,74 @@ func TestDocumentHighlightStillCoversTheWholeFile(t *testing.T) {
 	}
 	if len(got) != 3 {
 		t.Fatalf("expected the declaration and both uses, got %+v", got)
+	}
+}
+
+// declarationPart is the index's rendering of the declaration, the part of a
+// hover before the semantic section that follows a "---" rule.
+func declarationPart(value string) string {
+	decl, _, _ := strings.Cut(value, "\n\n---\n\n")
+	return decl
+}
+
+func hoverAt(t *testing.T, s *Server, uri string, line, character int) *protocol.Hover {
+	t.Helper()
+	hover, err := s.TextDocumentHover(nil, &protocol.HoverParams{
+		TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+			TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+			Position:     protocol.Position{Line: protocol.UInteger(line), Character: protocol.UInteger(character)},
+		},
+	})
+	if err != nil {
+		t.Fatalf("TextDocumentHover: %v", err)
+	}
+	return hover
+}
+
+func openText(t *testing.T, s *Server, uri, text string) {
+	t.Helper()
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: text},
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// Hovering a use of a signal shows both what it was declared as (from the
+// index) and what the expression around it means (from the semantic model).
+func TestHoverShowsDeclarationAndSemanticMeaning(t *testing.T) {
+	s := newTestServer()
+	openText(t, s, "file:///h.sv", "module m #(parameter W = 4);\n  logic [W-1:0] a, b;\n  logic [W:0] sum;\n  assign sum = a + b;\nendmodule\n")
+	hover := hoverAt(t, s, "file:///h.sv", 3, 15)
+	if hover == nil {
+		t.Fatal("expected a hover")
+	}
+	value := hover.Contents.(protocol.MarkupContent).Value
+	decl, sem, found := strings.Cut(value, "\n\n---\n\n")
+	if !found {
+		t.Fatalf("expected a declaration and a semantic section, got %q", value)
+	}
+	if decl != "```systemverilog\nlogic [W-1:0] a\n```" {
+		t.Errorf("declaration part: %q", decl)
+	}
+	for _, want := range []string{"`a` : `logic [3:0]` (4 bits)", "in `a + b` : `logic [3:0]` (4 bits, 5 in this assignment)"} {
+		if !strings.Contains(sem, want) {
+			t.Errorf("semantic part missing %q: %q", want, sem)
+		}
+	}
+}
+
+// A literal has no declaration, but its type and value are still worth
+// showing.
+func TestHoverOnLiteralShowsOnlySemanticMeaning(t *testing.T) {
+	s := newTestServer()
+	openText(t, s, "file:///l.sv", "module m;\n  logic [7:0] x;\n  assign x = 8'hF0 + 1;\nendmodule\n")
+	hover := hoverAt(t, s, "file:///l.sv", 2, 15)
+	if hover == nil {
+		t.Fatal("expected a hover on the literal")
+	}
+	value := hover.Contents.(protocol.MarkupContent).Value
+	if strings.Contains(value, "systemverilog") || !strings.Contains(value, "= `240`") {
+		t.Fatalf("got %q", value)
 	}
 }

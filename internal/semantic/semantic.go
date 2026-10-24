@@ -1,0 +1,338 @@
+// Package semantic answers "what does this mean?" questions about a position
+// in the workspace using svparse's semantic model (sema): the resolved type
+// of the expression under the cursor and its constant value, beside what the
+// declaration index already knows about the name. It is built lazily from
+// the parse trees the index keeps, and rebuilt only when they change.
+package semantic
+
+import (
+	"fmt"
+	"strconv"
+	"strings"
+	"sync"
+
+	"github.com/jfetkotto/svparse/v2/ast"
+	"github.com/jfetkotto/svparse/v2/sema"
+)
+
+// Source supplies the workspace's parse trees and a generation number that
+// changes whenever any of them does (sv.Index.ASTs).
+type Source func() ([]*ast.File, uint64)
+
+// Service builds the semantic model on demand and caches it per generation.
+type Service struct {
+	source Source
+
+	mu    sync.Mutex
+	gen   uint64
+	built bool
+	model *sema.Model
+	files map[string]*ast.File
+}
+
+// New returns a Service reading its trees from source.
+func New(source Source) *Service { return &Service{source: source} }
+
+// Info is what the semantic model knows about a position. Either part may be
+// absent: a keyword has neither, a declaration's name has only Symbol, and an
+// operator inside an expression has only Expr.
+type Info struct {
+	// Symbol describes the name under the cursor when it resolves to
+	// something with a type or a value (a signal, a port, a parameter).
+	Symbol *Entry
+	// Expr describes the smallest expression under the cursor.
+	Expr *Entry
+	// Parent describes the expression that directly encloses Expr, when it is
+	// a different, larger expression: hovering "a" in "a + b" gives the sum.
+	Parent *Entry
+}
+
+// Entry is one thing described: source text, its type and, when it is a
+// constant, its value.
+type Entry struct {
+	Text   string
+	Kind   string // symbol kind, "" for an expression
+	Type   string
+	Bits   int // 0 when the type has no defined width
+	Signed bool
+	Value  string // "" when not a constant
+	// ContextBits is the width the expression is evaluated at when it is
+	// part of an assignment's right-hand side and the assignment widens it
+	// beyond its own width (LRM 11.8.1); 0 when it is the same as Bits.
+	ContextBits int
+}
+
+// Describe resolves the position (line and character are the zero-based LSP
+// values, characters in UTF-16 units, as svparse positions are) in uri. word
+// is the identifier under the cursor, "" if none.
+func (s *Service) Describe(uri string, line, character int, word string) (info Info, ok bool) {
+	defer func() {
+		if recover() != nil { // hover must never take the server down
+			info, ok = Info{}, false
+		}
+	}()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	file := s.fileLocked(uri)
+	if file == nil {
+		return Info{}, false
+	}
+	at := s.locate(file, uri, line, character)
+	if at.scope == nil {
+		return Info{}, false
+	}
+	// Inside an expression the expression answers for its names (a member
+	// name looked up on its own would find an unrelated symbol). A name
+	// outside any expression is a declaration's, resolved from the scope.
+	if len(at.path) == 0 && word != "" {
+		if e, found := s.symbol(at.scope, word); found {
+			info.Symbol = e
+		}
+	}
+	if n := len(at.path); n > 0 {
+		ctx := s.assignmentContext(at)
+		if e, found := s.expr(at.scope, at.path[n-1], ctx); found {
+			info.Expr = e
+		}
+		for i := n - 2; i >= 0; i-- {
+			if _, paren := at.path[i].(*ast.Paren); paren {
+				continue
+			}
+			if e, found := s.expr(at.scope, at.path[i], ctx); found && (info.Expr == nil || e.Text != info.Expr.Text) {
+				info.Parent = e
+			}
+			break
+		}
+	}
+	return info, info.Symbol != nil || info.Expr != nil || info.Parent != nil
+}
+
+// assignmentContext binds the right-hand side of the assignment containing
+// the position against its target's type, the way the language evaluates it
+// (LRM 11.8.1: operands are widened to the larger of the sides), and indexes
+// the result by source expression. It is nil outside an assignment.
+func (s *Service) assignmentContext(at found) map[ast.Expr]sema.BoundExpr {
+	if at.assign == nil || len(at.path) == 0 || at.assign.RHS != at.path[0] {
+		return nil
+	}
+	lhs, _ := s.model.Bind(at.scope, at.assign.LHS)
+	if lhs == nil || lhs.Type() == nil {
+		return nil
+	}
+	rhs, _ := s.model.BindAssign(at.scope, lhs.Type(), at.assign.RHS)
+	if rhs == nil {
+		return nil
+	}
+	byExpr := map[ast.Expr]sema.BoundExpr{}
+	sema.WalkBound(rhs, func(b sema.BoundExpr) bool {
+		if src := b.Source(); src != nil {
+			if _, dup := byExpr[src]; !dup {
+				byExpr[src] = b
+			}
+		}
+		return true
+	})
+	return byExpr
+}
+
+func lastOf(path []ast.Expr) ast.Expr {
+	if len(path) == 0 {
+		return nil
+	}
+	return path[len(path)-1]
+}
+
+// fileLocked returns uri's tree, rebuilding the model if the workspace
+// changed since it was last built.
+func (s *Service) fileLocked(uri string) *ast.File {
+	files, gen := s.source()
+	if !s.built || gen != s.gen {
+		comp := sema.NewCompilation(sema.Options{})
+		byURI := make(map[string]*ast.File, len(files))
+		for _, f := range files {
+			comp.AddFile(f)
+			byURI[f.Path] = f
+		}
+		s.model, s.files, s.gen, s.built = comp.Model(), byURI, gen, true
+	}
+	return s.files[uri]
+}
+
+// symbol describes a name looked up from scope.
+func (s *Service) symbol(scope *sema.Scope, name string) (*Entry, bool) {
+	sym := scope.Lookup(name).Symbol
+	if sym == nil {
+		return nil, false
+	}
+	e := &Entry{Text: name, Kind: sym.Kind.String()}
+	defer func() {
+		if e.Type == invalidType {
+			e.Type, e.Bits = "", 0
+		}
+	}()
+	switch sym.Kind {
+	case sema.SymVariable, sema.SymNet, sema.SymPort, sema.SymArg, sema.SymParameter, sema.SymLoopVar, sema.SymGenvar:
+		if t, _ := s.model.TypeOf(sym); t != nil {
+			fillType(e, t)
+		}
+	}
+	if sym.Kind == sema.SymParameter {
+		if c, ds := s.model.ParamValue(sym, nil); len(ds) == 0 {
+			e.Value = valueString(c)
+		}
+	}
+	return e, e.Type != "" || e.Value != ""
+}
+
+// expr describes an expression bound in scope.
+func (s *Service) expr(scope *sema.Scope, x ast.Expr, ctx map[ast.Expr]sema.BoundExpr) (*Entry, bool) {
+	be, _ := s.model.Bind(scope, x)
+	if be == nil || be.Type() == nil || be.Type().String() == invalidType {
+		return nil, false
+	}
+	e := &Entry{Text: ast.ExprString(x)}
+	fillType(e, be.Type())
+	if e.Type == "" {
+		return nil, false
+	}
+	if c, ds := s.model.EvalBound(be, nil); len(ds) == 0 {
+		e.Value = valueString(c)
+	}
+	if b, ok := ctx[x]; ok && b.Type() != nil {
+		if w, ok := sema.Bits(b.Type()); ok && w != e.Bits {
+			e.ContextBits = w
+		}
+	}
+	return e, true
+}
+
+// valueString shows an integer constant in decimal, which is how it reads in
+// a hover, and anything else (reals, strings, x/z values) as sema prints it.
+func valueString(c sema.Const) string {
+	if c.Kind == sema.ConstInt {
+		if v, ok := c.Int64(); ok {
+			return strconv.FormatInt(v, 10)
+		}
+	}
+	return c.String()
+}
+
+// invalidType is how sema prints the type of an expression it could not
+// resolve; it says nothing a reader wants.
+const invalidType = "<invalid>"
+
+func fillType(e *Entry, t sema.Type) {
+	e.Type = t.String()
+	if w, ok := sema.Bits(t); ok {
+		e.Bits = w
+	}
+	e.Signed = sema.IsIntegral(t) && sema.IsSigned(t)
+}
+
+// Markdown renders i as the hover section that follows the declaration: one
+// line per entry, "`text` : `type` (width, sign) = value".
+func (i Info) Markdown() string {
+	var lines []string
+	add := func(label string, e *Entry) {
+		if e != nil {
+			lines = append(lines, label+e.line())
+		}
+	}
+	add("", i.Symbol)
+	add("", i.Expr)
+	add("in ", i.Parent)
+	return strings.Join(lines, "  \n")
+}
+
+func (e *Entry) line() string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "`%s`", e.Text)
+	if e.Kind != "" {
+		fmt.Fprintf(&b, " (%s)", e.Kind)
+	}
+	if e.Type != "" {
+		fmt.Fprintf(&b, " : `%s`", e.Type)
+		var facts []string
+		if e.Bits > 0 {
+			facts = append(facts, fmt.Sprintf("%d bit", e.Bits))
+			if e.Bits != 1 {
+				facts[0] += "s"
+			}
+			if e.Signed {
+				facts = append(facts, "signed")
+			}
+			if e.ContextBits > 0 {
+				facts = append(facts, fmt.Sprintf("%d in this assignment", e.ContextBits))
+			}
+		}
+		if len(facts) > 0 {
+			fmt.Fprintf(&b, " (%s)", strings.Join(facts, ", "))
+		}
+	}
+	if e.Value != "" {
+		fmt.Fprintf(&b, " = `%s`", e.Value)
+	}
+	return b.String()
+}
+
+// found is where a position lies: the scope to resolve names in and the
+// chain of expressions containing it, outermost first.
+type found struct {
+	scope  *sema.Scope
+	path   []ast.Expr
+	assign *ast.Assign // the innermost assignment around the position
+}
+
+// locate finds the innermost scope and the expression chain at a position by
+// walking the tree down every node that contains it. Children are visited
+// after their parent, so the last node recorded is the deepest.
+func (s *Service) locate(f *ast.File, uri string, line, character int) found {
+	us, _ := s.model.UnitScope(f.Path)
+	res := &found{scope: us}
+	ast.Walk(&locator{model: s.model, uri: uri, line: line, char: character, res: res, scope: us}, f)
+	return *res
+}
+
+type locator struct {
+	model      *sema.Model
+	uri        string
+	line, char int
+	res        *found
+
+	scope  *sema.Scope
+	path   []ast.Expr
+	assign *ast.Assign
+}
+
+func (w *locator) contains(p ast.Position) bool {
+	if p.File != "" && p.File != w.uri {
+		return false
+	}
+	afterStart := w.line > p.Line || (w.line == p.Line && w.char >= p.Character)
+	beforeEnd := w.line < p.EndLine || (w.line == p.EndLine && w.char < p.EndCharacter)
+	return afterStart && beforeEnd
+}
+
+func (w *locator) Visit(n ast.Node) ast.Visitor {
+	if n == nil {
+		return nil
+	}
+	if _, isFile := n.(*ast.File); isFile {
+		return w
+	}
+	if !w.contains(n.Pos()) {
+		return nil
+	}
+	next := *w
+	if sc, ok := w.model.ScopeOf(n); ok {
+		next.scope = sc
+	}
+	if e, ok := n.(ast.Expr); ok {
+		next.path = append(append([]ast.Expr(nil), w.path...), e)
+	}
+	if a, ok := n.(*ast.Assign); ok {
+		next.assign = a
+	}
+	*w.res = found{scope: next.scope, path: next.path, assign: next.assign}
+	return &next
+}

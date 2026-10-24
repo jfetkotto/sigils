@@ -272,6 +272,7 @@ func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]s
 
 	res.Diagnostics = diagnosticsByFile(uri, ppErrs, parseErrs)
 	res.Decls, res.imports, res.connections, res.links = declarationsFromAST(f)
+	res.File = f
 	return res
 }
 
@@ -288,6 +289,10 @@ type ScanResult struct {
 	// Diagnostics holds each file's preprocessing and parsing errors,
 	// always with an entry (possibly empty) for the scanned file.
 	Diagnostics map[string][]Diagnostic
+	// File is the parsed tree of the scanned file, with the content of its
+	// `include d files inlined. The semantic layer (see internal/semantic)
+	// builds its compilation from these.
+	File *ast.File
 
 	// imports, connections and links are the side channels only Index
 	// consumes: import statements (see importDecl), named instantiation
