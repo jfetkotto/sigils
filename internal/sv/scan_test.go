@@ -2,6 +2,7 @@ package sv
 
 import (
 	"fmt"
+	"strings"
 	"testing"
 	"unsafe"
 )
@@ -1335,5 +1336,28 @@ endmodule
 		if d.Parent != top {
 			t.Errorf("%s: parent %d, want the module (%d)", name, d.Parent, top)
 		}
+	}
+}
+
+func TestScanStructureListsProcessesAndGenerateConstructsInSourceOrder(t *testing.T) {
+	src := "module m #(parameter N = 2)(input clk);\n  always_ff @(posedge clk) begin end\n  if (N > 1) begin : wide\n    logic extra;\n  end else begin\n    logic narrow;\n  end\n  initial begin end\nendmodule\n"
+	var names []string
+	for _, s := range Scan("u", src, nil, nil).Structure {
+		names = append(names, s.Name)
+	}
+	if got := strings.Join(names, "|"); got != "always_ff|if (N > 1)|wide|else|initial" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func TestScanStructureSkipsIncludedContent(t *testing.T) {
+	res := Scan("u", "module m;\n  always_comb begin end\nendmodule\n", nil, nil)
+	for _, s := range res.Structure {
+		if s.Line < 0 {
+			t.Fatalf("bad line %+v", s)
+		}
+	}
+	if len(res.Structure) != 1 || res.Structure[0].Detail != "" {
+		t.Fatalf("got %+v", res.Structure)
 	}
 }

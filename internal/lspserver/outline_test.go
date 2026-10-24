@@ -248,3 +248,103 @@ func TestDocumentSymbolKeepsIncludedDeclarationsAtTheHeadersOwnRoot(t *testing.T
 		t.Fatalf("expected exactly [t_header_cfg] at the header's outline root, got %#v", result)
 	}
 }
+
+// outlineOf opens src and returns the documentSymbol tree.
+func outlineOf(t *testing.T, src string) []protocol.DocumentSymbol {
+	t.Helper()
+	s := newTestServer()
+	uri := "file:///o.sv"
+	openText(t, s, uri, src)
+	result, err := s.TextDocumentDocumentSymbol(nil, &protocol.DocumentSymbolParams{TextDocument: protocol.TextDocumentIdentifier{URI: uri}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, _ := result.([]protocol.DocumentSymbol)
+	return tree
+}
+
+// shape renders a tree as "name(child,child)" for comparison.
+func shape(syms []protocol.DocumentSymbol) string {
+	parts := make([]string, len(syms))
+	for i, s := range syms {
+		parts[i] = s.Name
+		if len(s.Children) > 0 {
+			parts[i] += "(" + shape(s.Children) + ")"
+		}
+	}
+	return strings.Join(parts, ",")
+}
+
+func TestOutlineShowsProcessesAndGenerateBlocks(t *testing.T) {
+	tree := outlineOf(t, `module m #(parameter N = 2)(input clk, input rst_n, output logic q);
+  logic [N-1:0] state;
+  always_ff @(posedge clk or negedge rst_n) begin
+    state <= '0;
+  end
+  always_comb q = state[0];
+  initial state = '0;
+  for (genvar i = 0; i < N; i++) begin : lane
+    logic bit_q;
+    assign bit_q = state[i];
+  end
+  if (N > 1) begin : wide
+    logic extra;
+  end else begin
+    logic narrow;
+  end
+endmodule
+`)
+	got := shape(tree)
+	want := "m(N,clk,rst_n,q,state,always_ff,always_comb,initial,for (i)(lane(bit_q)),if (N > 1)(wide(extra),else(narrow)))"
+	if got != want {
+		t.Fatalf("outline\n got  %s\n want %s", got, want)
+	}
+	mod := tree[0]
+	for _, c := range mod.Children {
+		if c.Name == "always_ff" {
+			if c.Detail == nil || *c.Detail != "@(posedge clk or negedge rst_n)" || c.Kind != protocol.SymbolKindEvent {
+				t.Errorf("always_ff: %+v", c)
+			}
+		}
+		if c.Name == "for (i)" && c.Kind != protocol.SymbolKindNamespace {
+			t.Errorf("for kind: %+v", c)
+		}
+	}
+}
+
+func TestOutlineWithoutStructureIsUnchanged(t *testing.T) {
+	tree := outlineOf(t, "module m(input a);\n  logic b;\nendmodule\n")
+	if got := shape(tree); got != "m(a,b)" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+// A process inside a class method's module neighbour must not capture
+// declarations of the next module.
+func TestOutlineProcessesStayInTheirModule(t *testing.T) {
+	tree := outlineOf(t, "module a;\n  initial begin end\nendmodule\nmodule b;\n  logic x;\n  always_comb x = 1;\nendmodule\n")
+	if got := shape(tree); got != "a(initial),b(x,always_comb)" {
+		t.Fatalf("got %s", got)
+	}
+}
+
+func BenchmarkOutlineWideModule(bench *testing.B) {
+	var b strings.Builder
+	b.WriteString("module wide(input clk);\n")
+	for i := range 3000 {
+		fmt.Fprintf(&b, "  logic s%d;\n", i)
+		if i%10 == 0 {
+			fmt.Fprintf(&b, "  always_ff @(posedge clk) s%d <= 1'b0;\n", i)
+		}
+	}
+	b.WriteString("endmodule\n")
+	s := newTestServer()
+	s.index.SetFile("file:///w.sv", b.String())
+	params := &protocol.DocumentSymbolParams{TextDocument: protocol.TextDocumentIdentifier{URI: "file:///w.sv"}}
+	bench.ResetTimer()
+	for range bench.N {
+		if r, err := s.TextDocumentDocumentSymbol(nil, params); err != nil || r == nil {
+			bench.Fatal(r, err)
+		}
+	}
+}

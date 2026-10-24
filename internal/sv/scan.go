@@ -275,6 +275,7 @@ func Scan(uri, text string, resolver IncludeResolver, initialMacros map[string]s
 	res.Diagnostics = diagnosticsByFile(uri, ppErrs, parseErrs)
 	res.Decls, res.imports, res.connections, res.links = declarationsFromAST(f)
 	res.File = f
+	res.Structure = structureFromAST(f)
 	return res
 }
 
@@ -295,6 +296,9 @@ type ScanResult struct {
 	// `include d files inlined. The semantic layer (see internal/semantic)
 	// builds its compilation from these.
 	File *ast.File
+	// Structure lists the scanned file's own processes and generate
+	// constructs, for the outline.
+	Structure []Structure
 	// Directives are the comments that carry lint directives
 	// ("// svparse: disable=rule"), the only comments the semantic layer
 	// reads.
