@@ -472,7 +472,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 				EndLine: param.Line, EndCharacter: param.Character + UTF16Len(param.Name),
 				Parent: idx,
 				Detail: formatType(param.Type),
-				ext:    newParameterExt(joinTokenText(param.Default)),
+				ext:    newParameterExt(exprText(param.DefaultExpr)),
 			})
 		}
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
@@ -594,7 +594,7 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			EndLine: n.Line, EndCharacter: n.Character + UTF16Len(n.Name),
 			Parent: parent,
 			Detail: formatType(n.Type),
-			ext:    newParameterExt(joinTokenText(n.Default)),
+			ext:    newParameterExt(exprText(n.DefaultExpr)),
 		})
 
 	case *ast.Modport:
@@ -723,18 +723,18 @@ func convertParams(params []ast.Parameter) []Port {
 		if p.IsLocal {
 			continue
 		}
-		out = append(out, Port{Name: p.Name, Detail: paramDetail(p.Type, p.Default)})
+		out = append(out, Port{Name: p.Name, Detail: paramDetail(p.Type, p.DefaultExpr)})
 	}
 	return out
 }
 
-func paramDetail(t ast.Type, def []preprocessor.Token) string {
+func paramDetail(t ast.Type, def ast.Expr) string {
 	parts := make([]string, 0, 2)
 	if typeText := formatType(t); typeText != "" {
 		parts = append(parts, typeText)
 	}
-	if len(def) > 0 {
-		parts = append(parts, "= "+joinTokenText(def))
+	if def != nil {
+		parts = append(parts, "= "+exprText(def))
 	}
 	return strings.Join(parts, " ")
 }
@@ -785,22 +785,27 @@ func formatType(t ast.Type) string {
 	b.WriteString(t.Name)
 	for _, d := range t.PackedDims {
 		b.WriteString(" [")
-		b.WriteString(joinTokenText(d.Left))
-		if d.Right != nil {
+		if d.Wildcard {
+			b.WriteString("*")
+		} else {
+			b.WriteString(exprText(d.LeftExpr))
+		}
+		if d.RightExpr != nil {
 			b.WriteString(":")
-			b.WriteString(joinTokenText(d.Right))
+			b.WriteString(exprText(d.RightExpr))
 		}
 		b.WriteString("]")
 	}
 	return b.String()
 }
 
-func joinTokenText(toks []preprocessor.Token) string {
-	var b strings.Builder
-	for _, t := range toks {
-		b.WriteString(t.Text)
+// exprText renders a parsed expression as hover and completion text, "" for
+// none.
+func exprText(e ast.Expr) string {
+	if e == nil {
+		return ""
 	}
-	return b.String()
+	return ast.ExprString(e)
 }
 
 // structUnionFields converts a struct/union typedef's member list for
@@ -840,8 +845,8 @@ func enumMemberTexts(members []ast.EnumMember) (labels, values []string) {
 	known := true
 	for i, m := range members {
 		var value string
-		if len(m.Value) > 0 {
-			value = joinTokenText(m.Value)
+		if m.ValueExpr != nil {
+			value = exprText(m.ValueExpr)
 			if n, err := strconv.Atoi(value); err == nil {
 				next, known = n+1, true
 			} else {

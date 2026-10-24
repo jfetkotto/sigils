@@ -1062,7 +1062,7 @@ func TestHoverShowsDeclarationAndSemanticMeaning(t *testing.T) {
 	if !found {
 		t.Fatalf("expected a declaration and a semantic section, got %q", value)
 	}
-	if decl != "```systemverilog\nlogic [W-1:0] a\n```" {
+	if decl != "```systemverilog\nlogic [W - 1:0] a\n```" {
 		t.Errorf("declaration part: %q", decl)
 	}
 	for _, want := range []string{"`a` : `logic [3:0]` (4 bits)", "in `a + b` : `logic [3:0]` (4 bits, 5 in this assignment)"} {

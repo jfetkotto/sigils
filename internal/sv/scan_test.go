@@ -637,7 +637,7 @@ func TestScanDeclarationsTypedefEnumStopsComputingAfterNonLiteralValue(t *testin
 	src := "typedef enum {A = WIDTH-1, B} t;\n"
 	decls := ScanDeclarations("test.sv", src)
 	tDecl := findDecl(t, decls, "t")
-	want := []string{"A = WIDTH-1", "B"}
+	want := []string{"A = WIDTH - 1", "B"}
 	if len(tDecl.EnumMembers()) != len(want) {
 		t.Fatalf("EnumMembers = %v, want %v", tDecl.EnumMembers(), want)
 	}
