@@ -52,7 +52,16 @@ type Server struct {
 
 	// published records, per URI, the diagnostics last sent to the client,
 	// so an unchanged list isn't sent again. See diagnosticsChanged.
-	published map[string][]sv.Diagnostic
+	published map[string][]shownDiagnostic
+
+	// semDiags holds the semantic diagnostics last computed, by file; guarded
+	// by mu. semTimer debounces recomputing them after the index changes (see
+	// scheduleSemantic), semanticDebounce is its delay, and semanticDone, if
+	// set, is called after each recomputation so a test can wait for it.
+	semDiags         map[string][]shownDiagnostic
+	semTimer         *time.Timer
+	semanticDebounce time.Duration
+	semanticDone     func()
 
 	// tokMu guards tokens, the lexed form of each open document -- see
 	// tokensFor.
@@ -75,8 +84,11 @@ func NewServer(log commonlog.Logger) *Server {
 		docs:      document.NewStore(),
 		index:     index,
 		sem:       semantic.New(index.ASTs),
-		published: make(map[string][]sv.Diagnostic),
-		tokens:    make(map[string]cachedTokens),
+		published: make(map[string][]shownDiagnostic),
+		semDiags:  make(map[string][]shownDiagnostic),
+
+		semanticDebounce: defaultSemanticDebounce,
+		tokens:           make(map[string]cachedTokens),
 
 		watchDebounce: defaultWatchDebounce,
 	}

@@ -6,14 +6,21 @@
 package semantic
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jfetkotto/svparse/v2/ast"
+	"github.com/jfetkotto/svparse/v2/diag"
+	"github.com/jfetkotto/svparse/v2/elab"
 	"github.com/jfetkotto/svparse/v2/sema"
 )
+
+// elaborationBudget caps the time elaboration may take in one diagnostics pass.
+const elaborationBudget = 5 * time.Second
 
 // Source supplies the workspace's parse trees and a generation number that
 // changes whenever any of them does (sv.Index.ASTs).
@@ -26,8 +33,13 @@ type Service struct {
 	mu    sync.Mutex
 	gen   uint64
 	built bool
+	comp  *sema.Compilation
 	model *sema.Model
 	files map[string]*ast.File
+
+	diags    map[string][]diag.Diagnostic // by file, for generation diagGen
+	diagsGen uint64
+	diagsOK  bool
 }
 
 // New returns a Service reading its trees from source.
@@ -153,7 +165,8 @@ func (s *Service) fileLocked(uri string) *ast.File {
 			comp.AddFile(f)
 			byURI[f.Path] = f
 		}
-		s.model, s.files, s.gen, s.built = comp.Model(), byURI, gen, true
+		s.comp, s.model, s.files, s.gen, s.built = comp, comp.Model(), byURI, gen, true
+		s.diagsOK = false
 	}
 	return s.files[uri]
 }
@@ -335,4 +348,41 @@ func (w *locator) Visit(n ast.Node) ast.Visitor {
 	}
 	*w.res = found{scope: next.scope, path: next.path, assign: next.assign}
 	return &next
+}
+
+// Diagnostics returns the semantic problems of the whole workspace, grouped
+// by the file each is in: duplicate definitions, unresolved names and types,
+// illegal assignments and drivers, and the like (everything sema reports
+// beyond syntax, which the index already has). The result is for the
+// generation of the trees seen at the call, which is also returned; callers
+// compare it with the index's to tell whether the answer went stale while
+// it was being computed.
+func (s *Service) Diagnostics() (map[string][]diag.Diagnostic, uint64) {
+	defer func() { _ = recover() }() // diagnostics must never take the server down
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.fileLocked("") // rebuild if the workspace changed
+	if !s.diagsOK {
+		var set diag.Set
+		set.AddAll(s.comp.Diagnostics())
+		set.AddAll(s.model.Diagnostics())
+		set.AddAll(s.model.CheckStatements())
+		// Elaboration finds what only the instance tree shows: modules that
+		// are not defined, port and parameter mismatches. It is bounded so a
+		// pathological design cannot stall the pass.
+		ctx, cancel := context.WithTimeout(context.Background(), elaborationBudget)
+		_, elabDiags := elab.Elaborate(ctx, s.comp, elab.Options{})
+		cancel()
+		set.AddAll(elabDiags)
+		byFile := map[string][]diag.Diagnostic{}
+		for _, d := range set.Sorted() {
+			switch d.Code {
+			case diag.CodeSyntaxError, diag.CodePreprocessorError:
+				continue // the index reports these
+			}
+			byFile[d.Range.File] = append(byFile[d.Range.File], d)
+		}
+		s.diags, s.diagsGen, s.diagsOK = byFile, s.gen, true
+	}
+	return s.diags, s.diagsGen
 }

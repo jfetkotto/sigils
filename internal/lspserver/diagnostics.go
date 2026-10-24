@@ -24,18 +24,35 @@ import (
 // flows through diagsByURI/touchedURIs like any other file. Logged
 // instead of silently dropped, so a broken +define+ isn't invisible.
 func (s *Server) publishDiagnostics(uris []string) {
+	s.publish(uris)
+	s.scheduleSemantic()
+}
+
+// publish sends each URI's current diagnostics, unless they are what the
+// client already has. A URI's diagnostics are the index's syntax errors, or,
+// when it has none, the semantic ones computed for it: semantic checks of a
+// file that does not parse mostly repeat the same mistake as cascades.
+func (s *Server) publish(uris []string) {
 	notify := s.getNotify()
 	if notify == nil {
 		return
 	}
 	for _, uri := range uris {
+		syntax := s.index.Diagnostics(uri)
 		if !isFileURI(uri) {
-			if diags := s.index.Diagnostics(uri); len(diags) > 0 {
-				s.log.Warningf("diagnostics for non-file %q not published to the client: %+v", uri, diags)
+			if len(syntax) > 0 {
+				s.log.Warningf("diagnostics for non-file %q not published to the client: %+v", uri, syntax)
 			}
 			continue
 		}
-		diags := s.index.Diagnostics(uri)
+		var diags []shownDiagnostic
+		if len(syntax) > 0 {
+			diags = syntaxDiagnostics(syntax)
+		} else {
+			s.mu.Lock()
+			diags = s.semDiags[uri]
+			s.mu.Unlock()
+		}
 		if !s.diagnosticsChanged(uri, diags) {
 			continue
 		}
@@ -46,27 +63,47 @@ func (s *Server) publishDiagnostics(uris []string) {
 	}
 }
 
-// diagnosticsToProtocol converts sv.Diagnostic (deliberately minimal and
-// LSP-agnostic) into protocol.Diagnostic. svparse's Error doesn't carry
-// the offending token's length, only a start position, so Range is a
-// minimal one-column span at that position rather than real token-width
-// highlighting -- a known, minor cosmetic simplification, not an attempt
-// at precise underlining. Severity is always Error: everything here comes
-// from svparse failing to preprocess or parse something, not from a lint
-// rule with graduated severity.
-func diagnosticsToProtocol(diags []sv.Diagnostic) []protocol.Diagnostic {
-	severity := protocol.DiagnosticSeverityError
-	source := "svparse"
+// shownDiagnostic is a diagnostic as the client sees it. It is comparable,
+// which is what lets diagnosticsChanged tell a repeat from a change.
+type shownDiagnostic struct {
+	Line, Character       int
+	EndLine, EndCharacter int
+	Severity              protocol.DiagnosticSeverity
+	Code                  string
+	Message               string
+}
+
+// syntaxDiagnostics wraps the index's preprocessing and parsing errors.
+// svparse's Error doesn't carry the offending token's length, only a start
+// position, so the range is a one-column span at that position rather than
+// real token-width highlighting -- a minor cosmetic simplification.
+func syntaxDiagnostics(diags []sv.Diagnostic) []shownDiagnostic {
+	out := make([]shownDiagnostic, len(diags))
+	for i, d := range diags {
+		out[i] = shownDiagnostic{
+			Line: d.Line, Character: d.Character, EndLine: d.Line, EndCharacter: d.Character + 1,
+			Severity: protocol.DiagnosticSeverityError, Message: d.Message,
+		}
+	}
+	return out
+}
+
+const diagnosticSource = "svparse"
+
+func diagnosticsToProtocol(diags []shownDiagnostic) []protocol.Diagnostic {
+	source := diagnosticSource
 	out := make([]protocol.Diagnostic, len(diags))
 	for i, d := range diags {
+		severity := d.Severity
 		out[i] = protocol.Diagnostic{
-			Range: protocol.Range{
-				Start: position(d.Line, d.Character),
-				End:   position(d.Line, d.Character+1),
-			},
+			Range:    protocol.Range{Start: position(d.Line, d.Character), End: position(d.EndLine, d.EndCharacter)},
 			Severity: &severity,
 			Source:   &source,
 			Message:  d.Message,
+		}
+		if d.Code != "" {
+			code := protocol.IntegerOrString{Value: d.Code}
+			out[i].Code = &code
 		}
 	}
 	return out
@@ -91,7 +128,7 @@ func diagnosticsToProtocol(diags []sv.Diagnostic) []protocol.Diagnostic {
 // clean workspace sends nothing at all rather than one empty list per file.
 // That also lets an empty list drop its entry, so published only ever holds
 // the URIs currently showing errors.
-func (s *Server) diagnosticsChanged(uri string, diags []sv.Diagnostic) bool {
+func (s *Server) diagnosticsChanged(uri string, diags []shownDiagnostic) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if slices.Equal(s.published[uri], diags) { // a missing entry reads as nil, i.e. empty
@@ -100,7 +137,7 @@ func (s *Server) diagnosticsChanged(uri string, diags []sv.Diagnostic) bool {
 	if len(diags) == 0 {
 		delete(s.published, uri)
 	} else {
-		s.published[uri] = diags // Index.Diagnostics hands back a fresh copy, so keeping it is safe
+		s.published[uri] = diags // the slice is never modified after it is built, so keeping it is safe
 	}
 	return true
 }
