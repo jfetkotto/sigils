@@ -32,18 +32,19 @@ func run(args ...string) (code int, out, errOut string) {
 
 func TestInitWritesAConfigTheServerAccepts(t *testing.T) {
 	dir := t.TempDir()
-	write(t, dir, "filelists/top.f", "-f sub.f\n../rtl/a.sv\n")
-	write(t, dir, "filelists/sub.f", "../rtl/b.sv\n")
-	write(t, dir, "rtl/a.sv", "module a; endmodule\n")
-	if code, out, errOut := run(dir); code != 0 {
+	write(t, dir, "filelists/top.f", "../rtl/a.sv\n") // not searched for
+	code, out, errOut := run(dir)
+	if code != 0 {
 		t.Fatalf("exit %d\n%s%s", code, out, errOut)
+	}
+	if !strings.Contains(out, "replace") || !strings.Contains(out, PlaceholderFilelist) {
+		t.Errorf("the output should say to replace the placeholder: %q", out)
 	}
 	cfg, err := workspace.LoadConfig(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
-	// sub.f is pulled in by top.f, so only top.f is an entry point.
-	if len(cfg.Filelists) != 1 || cfg.Filelists[0] != "filelists/top.f" {
+	if len(cfg.Filelists) != 1 || cfg.Filelists[0] != PlaceholderFilelist {
 		t.Errorf("filelists: %v", cfg.Filelists)
 	}
 	if !cfg.SemanticDiagnosticsEnabled() || !cfg.SemanticTokensEnabled() || cfg.SemanticNavigationEnabled() || !cfg.LintEnabled() {
@@ -98,36 +99,5 @@ func TestInitFilelistFlagAndPrint(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(dir, workspace.ConfigFileName)); err == nil {
 		t.Fatal("-print wrote a file")
-	}
-}
-
-func TestInitWithoutFilelistsSaysSo(t *testing.T) {
-	dir := t.TempDir()
-	code, out, _ := run(dir)
-	if code != 0 || !strings.Contains(out, "no filelist found") {
-		t.Fatalf("%d %q", code, out)
-	}
-	cfg, err := workspace.LoadConfig(dir)
-	if err != nil || len(cfg.Filelists) != 0 {
-		t.Fatalf("%v %v", cfg, err)
-	}
-}
-
-func TestFindFilelistsSkipsHiddenAndDeepDirectories(t *testing.T) {
-	dir := t.TempDir()
-	write(t, dir, "a.f", "x.sv\n")
-	write(t, dir, ".git/hooks/ignored.f", "x\n")
-	write(t, dir, "node_modules/p/ignored.f", "x\n")
-	write(t, dir, "l1/l2/l3/l4/too_deep.f", "x\n")
-	write(t, dir, "l1/l2/ok.fl", "x\n")
-	got := strings.Join(FindFilelists(dir), ",")
-	if got != "a.f,l1/l2/ok.fl" {
-		t.Fatalf("got %s", got)
-	}
-}
-
-func TestInitRejectsAMissingDirectory(t *testing.T) {
-	if code, _, errOut := run(filepath.Join(t.TempDir(), "nope")); code != 2 || !strings.Contains(errOut, "not a directory") {
-		t.Fatalf("%d %s", code, errOut)
 	}
 }

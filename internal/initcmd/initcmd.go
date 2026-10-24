@@ -1,21 +1,18 @@
 // Package initcmd implements "sigils init": it writes a .sigils.json for a
-// workspace, naming the filelists it finds and spelling out every option the
-// server reads, with the lint rules at their default levels, so the file is a
+// workspace that spells out every option the server reads, with the lint rules
+// at their default levels and a placeholder for the filelist, so the file is a
 // complete starting point to edit rather than something to write from the docs.
 package initcmd
 
 import (
-	"bufio"
 	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 
 	"github.com/jfetkotto/svparse/v2/lint"
@@ -40,18 +37,22 @@ type lintPart struct {
 	Ignore  []string          `json:"ignore"`
 }
 
+// PlaceholderFilelist stands in for the filelist until the user names theirs.
+const PlaceholderFilelist = "path/to/filelist.f"
+
 // Run is "sigils init [flags] [dir]". It returns the process exit status.
 func Run(args []string, stdout, stderr io.Writer) int {
 	fs := flag.NewFlagSet("sigils init", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	force := fs.Bool("force", false, "overwrite an existing "+workspace.ConfigFileName)
 	var lists multi
-	fs.Var(&lists, "filelist", "a top-level filelist, relative to the directory (repeatable; default: the ones found)")
+	fs.Var(&lists, "filelist", "a top-level filelist, relative to the directory (repeatable; default: a placeholder)")
 	printOnly := fs.Bool("print", false, "print the file instead of writing it")
 	fs.Usage = func() {
 		fmt.Fprintf(stderr, "usage: sigils init [-force] [-print] [-filelist path]... [dir]\n\n"+
-			"Writes %s in dir (default: the current directory) with the filelists it finds\n"+
-			"and every option at its default, including the lint rules and their levels.\n\n", workspace.ConfigFileName)
+			"Writes %s in dir (default: the current directory) with every option at\n"+
+			"its default, including the lint rules and their levels, and a placeholder\n"+
+			"for the filelist to replace.\n\n", workspace.ConfigFileName)
 		fs.PrintDefaults()
 	}
 	if err := fs.Parse(args); err != nil {
@@ -75,8 +76,9 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	}
 
 	filelists := []string(lists)
-	if len(filelists) == 0 {
-		filelists = FindFilelists(dir)
+	placeholder := len(filelists) == 0
+	if placeholder {
+		filelists = []string{PlaceholderFilelist}
 	}
 	data, err := Render(filelists)
 	if err != nil {
@@ -97,8 +99,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	fmt.Fprintf(stdout, "wrote %s\n", path)
-	if len(filelists) == 0 {
-		fmt.Fprintf(stdout, "no filelist found: add one under \"filelists\" so the server indexes your sources\n")
+	if placeholder {
+		fmt.Fprintf(stdout, "replace %q under \"filelists\" with your top-level filelist so the server indexes your sources\n", PlaceholderFilelist)
 	} else {
 		fmt.Fprintf(stdout, "filelists: %s\n", strings.Join(filelists, ", "))
 	}
@@ -132,80 +134,4 @@ func Render(filelists []string) ([]byte, error) {
 		return nil, err
 	}
 	return buf.Bytes(), nil
-}
-
-var filelistExts = map[string]bool{".f": true, ".fl": true, ".lst": true}
-
-// maxDepth bounds how far below the directory filelists are looked for.
-const maxDepth = 3
-
-// FindFilelists finds the top-level filelists under dir: the ones nothing else
-// pulls in with "-f". Hidden directories and node_modules are skipped. Paths
-// are relative to dir, with forward slashes, in sorted order.
-func FindFilelists(dir string) []string {
-	var found []string
-	root := filepath.Clean(dir)
-	_ = filepath.WalkDir(root, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		rel, _ := filepath.Rel(root, p)
-		if d.IsDir() {
-			name := d.Name()
-			depth := strings.Count(filepath.ToSlash(rel), "/") + 1
-			if rel != "." && (strings.HasPrefix(name, ".") || name == "node_modules" || depth > maxDepth) {
-				return fs.SkipDir
-			}
-			return nil
-		}
-		if filelistExts[strings.ToLower(filepath.Ext(p))] {
-			found = append(found, p)
-		}
-		return nil
-	})
-	included := map[string]bool{}
-	for _, p := range found {
-		for _, inc := range includedLists(p) {
-			included[filepath.Clean(inc)] = true
-		}
-	}
-	var out []string
-	for _, p := range found {
-		if included[filepath.Clean(p)] {
-			continue
-		}
-		rel, _ := filepath.Rel(root, p)
-		out = append(out, filepath.ToSlash(rel))
-	}
-	sort.Strings(out)
-	return out
-}
-
-// includedLists returns the filelists a filelist names with -f or -F, as paths
-// relative to the working directory like path itself.
-func includedLists(path string) []string {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil
-	}
-	defer f.Close()
-	var out []string
-	sc := bufio.NewScanner(f)
-	sc.Buffer(make([]byte, 0, 64<<10), 1<<20)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		for _, flagName := range []string{"-f ", "-F "} {
-			if rest, ok := strings.CutPrefix(line, flagName); ok {
-				arg := strings.TrimSpace(rest)
-				if i := strings.Index(arg, " //"); i >= 0 {
-					arg = strings.TrimSpace(arg[:i])
-				}
-				if !filepath.IsAbs(arg) {
-					arg = filepath.Join(filepath.Dir(path), arg)
-				}
-				out = append(out, arg)
-			}
-		}
-	}
-	return out
 }
