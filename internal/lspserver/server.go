@@ -13,6 +13,7 @@ import (
 	"github.com/tliron/glsp"
 
 	"github.com/jfetkotto/sigils/internal/document"
+	"github.com/jfetkotto/sigils/internal/semantic"
 	"github.com/jfetkotto/sigils/internal/sv"
 	"github.com/jfetkotto/sigils/internal/workspace"
 )
@@ -27,6 +28,10 @@ type Server struct {
 	log   commonlog.Logger
 	docs  *document.Store
 	index *sv.Index
+	// sem answers what names and expressions mean (types, widths, constant
+	// values) from svparse's semantic model; hover shows that beside the
+	// declaration the index finds.
+	sem *semantic.Service
 
 	mu               sync.Mutex
 	root             string
@@ -64,10 +69,12 @@ type Server struct {
 // NewServer returns a Server with an empty index, logging to log. Nothing
 // is indexed until Initialize runs.
 func NewServer(log commonlog.Logger) *Server {
+	index := sv.NewIndex()
 	return &Server{
 		log:       log,
 		docs:      document.NewStore(),
-		index:     sv.NewIndex(),
+		index:     index,
+		sem:       semantic.New(index.ASTs),
 		published: make(map[string][]sv.Diagnostic),
 		tokens:    make(map[string]cachedTokens),
 

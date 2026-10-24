@@ -363,3 +363,30 @@ func BenchmarkTypeDeclarationThenComplete(b *testing.B) {
 		}
 	}
 }
+
+// Hover straight after an edit: the first hover after any change rebuilds
+// the semantic model of the whole workspace, so this is its worst case (the
+// model is reused for further hovers until the next edit).
+func BenchmarkHoverAfterEdit(b *testing.B) {
+	s, probe := benchWorkspace(b)
+	pos := benchPos(b, benchModule(0), "ckSideband")
+	pos.Character += 2
+	params := &protocol.HoverParams{TextDocumentPositionParams: benchTextDocPos(probe, pos)}
+	texts := [2]string{benchModule(0), benchModule(0) + "\n"}
+	b.ResetTimer()
+	for i := range b.N {
+		change := &protocol.DidChangeTextDocumentParams{
+			TextDocument: protocol.VersionedTextDocumentIdentifier{
+				TextDocumentIdentifier: protocol.TextDocumentIdentifier{URI: protocol.DocumentUri(probe)},
+				Version:                int32(i + 2),
+			},
+			ContentChanges: []any{protocol.TextDocumentContentChangeEventWhole{Text: texts[i%2]}},
+		}
+		if err := s.TextDocumentDidChange(nil, change); err != nil {
+			b.Fatal(err)
+		}
+		if h, err := s.TextDocumentHover(nil, params); err != nil || h == nil {
+			b.Fatalf("hover = %v, %v", h, err)
+		}
+	}
+}
