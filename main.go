@@ -9,10 +9,14 @@ import (
 	protocol "github.com/tliron/glsp/protocol_3_16"
 	"github.com/tliron/glsp/server"
 
+	"github.com/jfetkotto/sigils/internal/initcmd"
 	"github.com/jfetkotto/sigils/internal/lspserver"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "init" {
+		os.Exit(initcmd.Run(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	logFile := flag.String("log-file", "", "write logs to this file instead of stderr")
 	verbosity := flag.Int("verbosity", 1, "commonlog verbosity: -4 (none) through 2 (debug)")
 	flag.Parse()

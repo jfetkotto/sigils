@@ -28,6 +28,8 @@ Produces a `sigils` binary that speaks LSP over stdio.
 
 ## Configuration
 
+`sigils init [dir]` writes a `.sigils.json` for you: it finds the top-level filelists under `dir` (default: the current directory; a filelist that another one pulls in with `-f` is not an entry point) and spells out every option, with each lint rule at the level it runs at by default, so there is something complete to edit. It will not overwrite an existing file without `-force`; `-print` shows the file instead of writing it, and `-filelist path` (repeatable) names the filelists yourself.
+
 A `.sigils.json` file at the workspace root marks the root (the same way `.git` does) and names one or more top-level filelists:
 
 ```json

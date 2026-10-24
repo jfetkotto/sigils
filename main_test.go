@@ -791,3 +791,33 @@ func TestExitWithoutShutdownYieldsNonZeroExitCode(t *testing.T) {
 		t.Fatalf("process did not exit within 5s after exit notification\nstderr:\n%s", stderr.String())
 	}
 }
+
+func TestInitSubcommandWritesAConfig(t *testing.T) {
+	bin := buildBinary(t)
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "files.f"), []byte("a.sv\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	out, err := exec.Command(bin, "init", dir).CombinedOutput()
+	if err != nil {
+		t.Fatalf("sigils init: %v\n%s", err, out)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, ".sigils.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var cfg struct {
+		Filelists []string
+		Lint      struct{ Rules map[string]string }
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	if len(cfg.Filelists) != 1 || cfg.Filelists[0] != "files.f" || len(cfg.Lint.Rules) < 15 {
+		t.Fatalf("got %+v", cfg)
+	}
+	// A second run refuses to overwrite.
+	if out, err := exec.Command(bin, "init", dir).CombinedOutput(); err == nil || !strings.Contains(string(out), "already exists") {
+		t.Fatalf("second run: %v %s", err, out)
+	}
+}
