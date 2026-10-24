@@ -35,6 +35,10 @@ type Config struct {
 	// only resolves what parses.
 	SemanticNavigation *bool `json:"semanticNavigation,omitempty"`
 
+	// SemanticTokens turns semantic highlighting on or off. It is on unless
+	// this is false.
+	SemanticTokens *bool `json:"semanticTokens,omitempty"`
+
 	// Lint tunes the lint rules, which run with the semantic diagnostics
 	// (so they stop with them). Absent, every rule runs at its default
 	// severity.
@@ -55,6 +59,11 @@ type LintSettings struct {
 // semantic model first.
 func (c Config) SemanticNavigationEnabled() bool {
 	return c.SemanticNavigation != nil && *c.SemanticNavigation
+}
+
+// SemanticTokensEnabled reports whether semantic highlighting is on.
+func (c Config) SemanticTokensEnabled() bool {
+	return c.SemanticTokens == nil || *c.SemanticTokens
 }
 
 // LintEnabled reports whether lint findings are published.
