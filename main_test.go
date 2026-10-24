@@ -795,10 +795,7 @@ func TestExitWithoutShutdownYieldsNonZeroExitCode(t *testing.T) {
 func TestInitSubcommandWritesAConfig(t *testing.T) {
 	bin := buildBinary(t)
 	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "files.f"), []byte("a.sv\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	out, err := exec.Command(bin, "init", dir).CombinedOutput()
+	out, err := exec.Command(bin, "init", "-filelist", "files.f", dir).CombinedOutput()
 	if err != nil {
 		t.Fatalf("sigils init: %v\n%s", err, out)
 	}
