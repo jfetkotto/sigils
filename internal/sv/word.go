@@ -3,7 +3,7 @@ package sv
 import (
 	"strings"
 
-	svtoken "github.com/jfetkotto/svparse/token"
+	svtoken "github.com/jfetkotto/svparse/v2/token"
 )
 
 // WordAt returns the identifier-like word touching the given zero-based

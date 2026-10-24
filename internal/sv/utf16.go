@@ -1,6 +1,6 @@
 package sv
 
-import svtoken "github.com/jfetkotto/svparse/token"
+import svtoken "github.com/jfetkotto/svparse/v2/token"
 
 // LSP positions are UTF-16 code units (the protocol's default encoding,
 // and the only one protocol 3.16 offers -- positionEncoding negotiation

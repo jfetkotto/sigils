@@ -1,6 +1,6 @@
 package sv
 
-import "github.com/jfetkotto/svparse/preprocessor"
+import "github.com/jfetkotto/svparse/v2/preprocessor"
 
 // IncludeResolver resolves `include paths the same way
 // preprocessor.IncludeResolver does, but also reports which paths it

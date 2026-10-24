@@ -1,6 +1,6 @@
 // Package sv indexes SystemVerilog/Verilog source: declarations, their
 // nesting, and the word under a cursor. Declarations come from
-// svparse (github.com/jfetkotto/svparse) -- a real lexer, preprocessor
+// svparse (github.com/jfetkotto/svparse/v2) -- a real lexer, preprocessor
 // (macro expansion, conditional compilation, `include resolution), and
 // declaration-grade parser -- via Scan, which translates svparse's AST
 // into this package's own flat Declaration/Occurrence model. This package
@@ -19,11 +19,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jfetkotto/svparse/ast"
-	"github.com/jfetkotto/svparse/lexer"
-	"github.com/jfetkotto/svparse/parser"
-	"github.com/jfetkotto/svparse/preprocessor"
-	svtoken "github.com/jfetkotto/svparse/token"
+	"github.com/jfetkotto/svparse/v2/ast"
+	"github.com/jfetkotto/svparse/v2/lexer"
+	"github.com/jfetkotto/svparse/v2/parser"
+	"github.com/jfetkotto/svparse/v2/preprocessor"
+	svtoken "github.com/jfetkotto/svparse/v2/token"
 )
 
 // Kind is what sort of construct a Declaration is. The zero value is no

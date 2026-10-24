@@ -3,8 +3,8 @@ package sv
 import (
 	"sort"
 
-	"github.com/jfetkotto/svparse/lexer"
-	svtoken "github.com/jfetkotto/svparse/token"
+	"github.com/jfetkotto/svparse/v2/lexer"
+	svtoken "github.com/jfetkotto/svparse/v2/token"
 )
 
 // InstantiationContextAt inspects text up to (line, character) and reports

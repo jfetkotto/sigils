@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/jfetkotto/svparse/lexer"
+	"github.com/jfetkotto/svparse/v2/lexer"
 )
 
 // Location is a declaration's position, independent of any LSP protocol
