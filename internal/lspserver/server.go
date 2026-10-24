@@ -83,7 +83,7 @@ func NewServer(log commonlog.Logger) *Server {
 		log:       log,
 		docs:      document.NewStore(),
 		index:     index,
-		sem:       semantic.New(index.ASTs),
+		sem:       semantic.New(func() semantic.Snapshot { snap := index.Snapshot(); return semantic.Snapshot(snap) }),
 		published: make(map[string][]shownDiagnostic),
 		semDiags:  make(map[string][]shownDiagnostic),
 

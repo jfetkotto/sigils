@@ -6,6 +6,8 @@ import (
 	"time"
 
 	protocol "github.com/tliron/glsp/protocol_3_16"
+
+	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
 // semanticHarness is a server whose semantic pass runs after a few
@@ -127,5 +129,42 @@ func TestSemanticDiagnosticsAreDebounced(t *testing.T) {
 	case <-h.done:
 		t.Fatal("more than one run for a burst of edits")
 	case <-time.After(150 * time.Millisecond):
+	}
+}
+
+const unusedSpare = "module m(input a, output b);\n  logic spare;\n  assign b = a;\nendmodule\n"
+
+func TestLintFindingsArePublishedWithTheirSeverity(t *testing.T) {
+	h := newSemanticHarness(t)
+	h.s.sem.SetLint(h.s.lintConfig(h.s.cfg))
+	h.set(t, "file:///m.sv", unusedSpare)
+	diags := h.diagnostics("file:///m.sv")
+	if len(diags) != 1 || diags[0].Code == nil || diags[0].Code.Value != "unused-signal" || *diags[0].Severity != protocol.DiagnosticSeverityWarning {
+		t.Fatalf("got %+v", diags)
+	}
+}
+
+func TestLintSuppressionCommentReachesTheClient(t *testing.T) {
+	h := newSemanticHarness(t)
+	h.s.sem.SetLint(h.s.lintConfig(h.s.cfg))
+	h.set(t, "file:///m.sv", "module m(input a, output b);\n  logic spare; // svparse: disable=unused-signal\n  assign b = a;\nendmodule\n")
+	if got := h.diagnostics("file:///m.sv"); len(got) != 0 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestLintSettings(t *testing.T) {
+	h := newSemanticHarness(t)
+	off := false
+	if h.s.lintConfig(workspace.Config{Lint: &workspace.LintSettings{Enabled: &off}}) != nil {
+		t.Error("lint.enabled=false should turn lint off")
+	}
+	cfg := h.s.lintConfig(workspace.Config{Lint: &workspace.LintSettings{Rules: map[string]string{"unused-signal": "off"}, Ignore: []string{"third_party/**"}}})
+	if cfg == nil || cfg.Rules["unused-signal"] != "off" || len(cfg.Ignore) != 1 {
+		t.Errorf("got %+v", cfg)
+	}
+	bad := h.s.lintConfig(workspace.Config{Lint: &workspace.LintSettings{Rules: map[string]string{"no-such-rule": "off"}}})
+	if bad == nil || len(bad.Rules) != 0 {
+		t.Errorf("an invalid setting should fall back to the defaults, got %+v", bad)
 	}
 }

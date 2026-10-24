@@ -79,6 +79,7 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 	s.watchCancel = cancel
 	s.snippetSupport = clientSupportsSnippets(params)
 	s.mu.Unlock()
+	s.sem.SetLint(s.lintConfig(cfg))
 	if prevCancel != nil {
 		s.log.Warning("initialize received again; cancelling the previous indexing pass")
 		prevCancel()

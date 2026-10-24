@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/jfetkotto/svparse/v2/ast"
+	"github.com/jfetkotto/svparse/v2/lint"
 	"github.com/jfetkotto/svparse/v2/parser"
 	"github.com/jfetkotto/svparse/v2/preprocessor"
 )
@@ -13,7 +14,7 @@ func serviceFor(t *testing.T, uri, text string) *Service {
 	t.Helper()
 	toks, _ := preprocessor.Preprocess(uri, text, nil)
 	f, _ := parser.Parse(uri, toks)
-	return New(func() ([]*ast.File, uint64) { return []*ast.File{f}, 1 })
+	return New(func() Snapshot { return Snapshot{Files: []*ast.File{f}, Generation: 1} })
 }
 
 // at finds the marker "@" in text, removes it, and describes that position.
@@ -95,7 +96,7 @@ func TestRebuildsWhenGenerationChanges(t *testing.T) {
 	toks, _ = preprocessor.Preprocess("u", "module m;\n  logic [7:0] x;\n  assign x = x;\nendmodule\n", nil)
 	f2, _ := parser.Parse("u", toks)
 	cur, gen := f1, uint64(1)
-	s := New(func() ([]*ast.File, uint64) { return []*ast.File{cur}, gen })
+	s := New(func() Snapshot { return Snapshot{Files: []*ast.File{cur}, Generation: gen} })
 	a, _ := s.Describe("u", 2, 13, "x")
 	cur, gen = f2, 2
 	b, _ := s.Describe("u", 2, 13, "x")
@@ -132,5 +133,47 @@ func TestDiagnosticsIncludeUndeclaredNames(t *testing.T) {
 	ds := byFile["file:///u.sv"]
 	if len(ds) != 1 || ds[0].Code != "undeclared-identifier" || ds[0].Range.Line != 1 {
 		t.Fatalf("got %+v", byFile)
+	}
+}
+
+const unusedSignal = "module m(input a, output b);\n  logic spare;\n  assign b = a;\nendmodule\n"
+
+func lintCodes(s *Service, uri string) map[string]bool {
+	byFile, _ := s.Diagnostics()
+	codes := map[string]bool{}
+	for _, d := range byFile[uri] {
+		codes[d.Code] = true
+	}
+	return codes
+}
+
+func TestDiagnosticsIncludeLintOnlyWhenEnabled(t *testing.T) {
+	s := serviceFor(t, "file:///l.sv", unusedSignal)
+	if lintCodes(s, "file:///l.sv")["unused-signal"] {
+		t.Fatal("lint findings published although lint is off")
+	}
+	s.SetLint(&lint.Config{})
+	if !lintCodes(s, "file:///l.sv")["unused-signal"] {
+		t.Fatal("expected unused-signal with lint on")
+	}
+	s.SetLint(&lint.Config{Rules: map[string]string{"unused-signal": "off"}})
+	if lintCodes(s, "file:///l.sv")["unused-signal"] {
+		t.Fatal("rule configured off still reported")
+	}
+	s.SetLint(nil)
+	if lintCodes(s, "file:///l.sv")["unused-signal"] {
+		t.Fatal("findings kept after lint was turned off")
+	}
+}
+
+func TestLintHonoursSuppressionComments(t *testing.T) {
+	text := "module m(input a, output b);\n  logic spare; // svparse: disable=unused-signal\n  assign b = a;\nendmodule\n"
+	toks, _ := preprocessor.Preprocess("file:///s.sv", text, nil)
+	f, _ := parser.Parse("file:///s.sv", toks)
+	res := preprocessor.PreprocessDetailed("file:///s.sv", text, nil, preprocessor.Options{KeepComments: true})
+	s := New(func() Snapshot { return Snapshot{Files: []*ast.File{f}, Directives: res.Comments, Generation: 1} })
+	s.SetLint(&lint.Config{})
+	if lintCodes(s, "file:///s.sv")["unused-signal"] {
+		t.Fatal("the suppression comment was ignored")
 	}
 }

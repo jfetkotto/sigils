@@ -7,6 +7,9 @@ import (
 	protocol "github.com/tliron/glsp/protocol_3_16"
 
 	"github.com/jfetkotto/svparse/v2/diag"
+	"github.com/jfetkotto/svparse/v2/lint"
+
+	"github.com/jfetkotto/sigils/internal/workspace"
 )
 
 // defaultSemanticDebounce is how long the index must be quiet before the
@@ -97,4 +100,23 @@ func lspSeverity(s diag.Severity) protocol.DiagnosticSeverity {
 		return protocol.DiagnosticSeverityInformation
 	}
 	return protocol.DiagnosticSeverityHint
+}
+
+// lintConfig turns the workspace's lint settings into svparse's, nil when lint
+// is off. Settings that do not validate (a misspelt rule name) are reported
+// and replaced by the defaults, rather than silently disabling nothing or
+// everything.
+func (s *Server) lintConfig(cfg workspace.Config) *lint.Config {
+	if !cfg.LintEnabled() {
+		return nil
+	}
+	out := lint.Config{}
+	if cfg.Lint != nil {
+		out = lint.Config{Rules: cfg.Lint.Rules, Ignore: cfg.Lint.Ignore}
+	}
+	if err := out.Validate(); err != nil {
+		s.log.Warningf("ignoring the lint settings in %s: %s", workspace.ConfigFileName, err)
+		out = lint.Config{}
+	}
+	return &out
 }
