@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	svtoken "github.com/jfetkotto/svparse/token"
+	svtoken "github.com/jfetkotto/svparse/v2/token"
 )
 
 func TestInstantiationContextAtInsideEmptyParens(t *testing.T) {

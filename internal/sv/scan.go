@@ -1,6 +1,6 @@
 // Package sv indexes SystemVerilog/Verilog source: declarations, their
 // nesting, and the word under a cursor. Declarations come from
-// svparse (github.com/jfetkotto/svparse) -- a real lexer, preprocessor
+// svparse (github.com/jfetkotto/svparse/v2) -- a real lexer, preprocessor
 // (macro expansion, conditional compilation, `include resolution), and
 // declaration-grade parser -- via Scan, which translates svparse's AST
 // into this package's own flat Declaration/Occurrence model. This package
@@ -19,11 +19,11 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/jfetkotto/svparse/ast"
-	"github.com/jfetkotto/svparse/lexer"
-	"github.com/jfetkotto/svparse/parser"
-	"github.com/jfetkotto/svparse/preprocessor"
-	svtoken "github.com/jfetkotto/svparse/token"
+	"github.com/jfetkotto/svparse/v2/ast"
+	"github.com/jfetkotto/svparse/v2/lexer"
+	"github.com/jfetkotto/svparse/v2/parser"
+	"github.com/jfetkotto/svparse/v2/preprocessor"
+	svtoken "github.com/jfetkotto/svparse/v2/token"
 )
 
 // Kind is what sort of construct a Declaration is. The zero value is no
@@ -465,6 +465,24 @@ func addDecl(d ast.Decl, uri string, parent int, buckets map[string][]Declaratio
 			})
 		}
 		walkDecls(n.Body, uri, idx, buckets, impBuckets, connBuckets, links)
+
+	// Generate constructs add no outline level: their contents belong to the
+	// enclosing scope, as they did when svparse flattened them.
+	case *ast.GenerateRegion:
+		walkDecls(n.Body, uri, parent, buckets, impBuckets, connBuckets, links)
+	case *ast.GenerateBlock:
+		walkDecls(n.Body, uri, parent, buckets, impBuckets, connBuckets, links)
+	case *ast.GenerateIf:
+		walkDecls([]ast.Decl{n.Then}, uri, parent, buckets, impBuckets, connBuckets, links)
+		if n.Else != nil {
+			walkDecls([]ast.Decl{n.Else}, uri, parent, buckets, impBuckets, connBuckets, links)
+		}
+	case *ast.GenerateFor:
+		walkDecls([]ast.Decl{n.Body}, uri, parent, buckets, impBuckets, connBuckets, links)
+	case *ast.GenerateCase:
+		for i := range n.Items {
+			walkDecls([]ast.Decl{n.Items[i].Body}, uri, parent, buckets, impBuckets, connBuckets, links)
+		}
 
 	case *ast.Class:
 		idx := appendDecl(buckets, uri, Declaration{
