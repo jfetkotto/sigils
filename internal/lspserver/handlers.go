@@ -95,8 +95,14 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 	change := protocol.TextDocumentSyncKindFull
 	version := serverVersion()
 
+	var tokenProvider any
+	if cfg.SemanticTokensEnabled() {
+		tokenProvider = &protocol.SemanticTokensOptions{Legend: semanticTokensLegend(), Full: true}
+	}
+
 	return protocol.InitializeResult{
 		Capabilities: protocol.ServerCapabilities{
+			SemanticTokensProvider: tokenProvider,
 			TextDocumentSync: &protocol.TextDocumentSyncOptions{
 				OpenClose: &openClose,
 				Change:    &change,
