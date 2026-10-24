@@ -125,3 +125,12 @@ func TestDiagnosticsOfACleanDesignAreEmpty(t *testing.T) {
 		t.Fatalf("got %+v", byFile)
 	}
 }
+
+func TestDiagnosticsIncludeUndeclaredNames(t *testing.T) {
+	s := serviceFor(t, "file:///u.sv", "module m(output b);\n  assign b = missing;\nendmodule\n")
+	byFile, _ := s.Diagnostics()
+	ds := byFile["file:///u.sv"]
+	if len(ds) != 1 || ds[0].Code != "undeclared-identifier" || ds[0].Range.Line != 1 {
+		t.Fatalf("got %+v", byFile)
+	}
+}
