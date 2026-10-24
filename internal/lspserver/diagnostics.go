@@ -25,7 +25,17 @@ import (
 // instead of silently dropped, so a broken +define+ isn't invisible.
 func (s *Server) publishDiagnostics(uris []string) {
 	s.publish(uris)
+	s.markDirty(uris)
 	s.scheduleSemantic()
+}
+
+// markDirty records the files that changed since the semantic pass last ran.
+func (s *Server) markDirty(uris []string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, uri := range uris {
+		s.semDirty[uri] = true
+	}
 }
 
 // publish sends each URI's current diagnostics, unless they are what the
