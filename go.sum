@@ -7,8 +7,8 @@ github.com/gorilla/websocket v1.5.3 h1:saDtZ6Pbx/0u+bgYQ3q96pZgCzfhKXGPqt7kZ72aN
 github.com/gorilla/websocket v1.5.3/go.mod h1:YR8l580nyteQvAITg2hZ9XVh4b55+EU/adAjf1fMHhE=
 github.com/iancoleman/strcase v0.3.0 h1:nTXanmYxhfFAMjZL34Ov6gkzEsSJZ5DbhxWjvSASxEI=
 github.com/iancoleman/strcase v0.3.0/go.mod h1:iwCmte+B7n89clKwxIoIXy/HfoL7AsD47ZCWhYzw7ho=
-github.com/jfetkotto/svparse v0.1.10 h1:g6fUaiBe/kh0Co6rAK4ROMLNnH4uxHUho3bK09DZFZo=
-github.com/jfetkotto/svparse v0.1.10/go.mod h1:3VFvIGiBnXf0o5extHfchYczvEmras8P8WcSR7licCM=
+github.com/jfetkotto/svparse v0.1.11 h1:K8Ww7wdcsybZmsd4kdb3tUOpGA3ETQmNe7CD53cR+bE=
+github.com/jfetkotto/svparse v0.1.11/go.mod h1:3VFvIGiBnXf0o5extHfchYczvEmras8P8WcSR7licCM=
 github.com/lucasb-eyer/go-colorful v1.2.0 h1:1nnpGOrhyZZuNyfu1QjKiUICQ74+3FNCN69Aj6K7nkY=
 github.com/lucasb-eyer/go-colorful v1.2.0/go.mod h1:R4dSotOR9KMtayYi1e77YzuveK+i7ruzyGqttikkLy0=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
