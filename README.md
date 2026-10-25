@@ -1,6 +1,6 @@
 # sigils
 
-A SystemVerilog language server, built on [`svparse`](https://github.com/jfetkotto/svparse) (lexer/preprocessor/parser) and [`glsp`](https://github.com/tliron/glsp) (LSP transport).
+A SystemVerilog language server, built on [`svparse` v2](https://github.com/jfetkotto/svparse) (lexer, preprocessor, parser, semantic model, elaborator and linter) and [`glsp`](https://github.com/tliron/glsp) (LSP transport). svparse v2 is currently pinned at a pre-release (`v2.0.0-alpha.1`).
 
 The name is a backronym (**S**till **I**ndexing, **G**ive **I**t **L**onger, **S**orry), or maybe it's that sigils are magical symbols, who knows?
 
@@ -10,7 +10,7 @@ The name is a backronym (**S**till **I**ndexing, **G**ive **I**t **L**onger, **S
 go install github.com/jfetkotto/sigils@latest
 ```
 
-Produces a `sigils` binary that speaks LSP over stdio.
+Produces a `sigils` binary that speaks LSP over stdio. Flags: `-log-file <path>` (log there instead of stderr) and `-verbosity <n>` (-4 none to 2 debug). `sigils init` writes a config file (see below).
 
 ## Features
 
@@ -19,11 +19,11 @@ Produces a `sigils` binary that speaks LSP over stdio.
 - Outline: modules, ports and declarations, plus `always`/`initial`/`final` processes (with their sensitivity) and generate constructs, with the declarations inside nested under them
 - Hover (the declaration, plus what the name or expression means: resolved type, width, and constant value, including the width an assignment evaluates it at)
 - Completion: symbol names, and named port/parameter-connection completion (`.name(`) at instantiation sites, snippet-aware
-- Document symbols (outline)
+- Folding ranges
 - Workspace symbol search
 - Find references / rename, correctly scoped workspace-wide, including named instantiation-connection sites, resolved from either the port's declaration or any of its connection sites
 - Document highlight
-- Diagnostics (push model): svparse's own preprocessor/parser errors, republished on open, edit, and file-watcher-triggered reindex (including a cascade to every file that `` `include``s a changed one)
+- Diagnostics (push model): svparse's preprocessor/parser errors plus semantic and lint findings (see Configuration), republished on open, edit, and file-watcher-triggered reindex (including a cascade to every file that `` `include``s a changed one)
 - Workspace/file discovery: finds the root by walking upward for a `.sigils.json` marker, then recursively expands its filelists into the full source set (symlink-aware, so a read-only network-cache repo checkout still indexes correctly)
 
 ## Configuration
@@ -61,12 +61,10 @@ Each filelist entry may itself point at other filelists (nested, resolved recurs
 
 ## Limitations
 
-`sigils` indexes via svparse, which is **declaration-grade**, not a full elaborator:
-
-- Expression/statement grammar and procedural bodies (`always`, function/task bodies, constraints) are recognized and skipped, not parsed
-- Diagnostics are syntax errors (immediate) plus semantic and elaboration errors (debounced, whole workspace; the design is elaborated with every uninstantiated module as a top), push-only (no LSP 3.17 pull); lint findings join the semantic ones
-- Unsupported constructs: non-ANSI port declarations, `specparam`, user-defined nettypes, class parameterization (`#(...)` on a class type, `extends`, or instantiation), `` `begin_keywords``/`` `end_keywords``, and a bare (non-typedef'd) enum/struct/union used inline as a variable's type
-- A couple of narrow preprocessor edge cases: the escaped-quote-within-stringify macro operator, and an `` `include`` argument built via macro expansion
+- svparse v2 is pre-release; its known limits apply: one `` `default_nettype`` per design, `defparam` paths with indices, type parameters are not substituted in types, and arrays of interfaces are not resolved
+- Class, constraint, covergroup, assertion and clocking-block bodies are parsed but not yet looked into by the undeclared-name check
+- Rename is lexical, not semantic, even with `"semanticNavigation": true`
+- Diagnostics are push-only (no LSP 3.17 pull)
 - POSIX paths only: `file://` URIs with a Windows drive letter aren't converted to native paths, so Windows isn't supported
 
 ## Helix example

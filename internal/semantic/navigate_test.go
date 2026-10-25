@@ -20,21 +20,6 @@ func serviceForFiles(t *testing.T, files map[string]string) *Service {
 	return New(func() Snapshot { return Snapshot{Files: trees, Generation: 1} })
 }
 
-// pos is the position of the nth (from 0) occurrence of needle in text.
-func pos(t *testing.T, text, needle string, nth int) (line, character int) {
-	t.Helper()
-	idx := -1
-	for i := 0; i <= nth; i++ {
-		next := strings.Index(text[idx+1:], needle)
-		if next < 0 {
-			t.Fatalf("%q occurs fewer than %d times", needle, nth+1)
-		}
-		idx += next + 1
-	}
-	line = strings.Count(text[:idx], "\n")
-	return line, idx - (strings.LastIndex(text[:idx], "\n") + 1)
-}
-
 // posAt is the position of delta characters into the first occurrence of marker.
 func posAt(t *testing.T, text, marker string, delta int) (line, character int) {
 	t.Helper()
