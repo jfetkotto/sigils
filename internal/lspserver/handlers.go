@@ -647,16 +647,58 @@ func (s *Server) symbolCompletionItems(text string, line, character int) ([]prot
 	}
 
 	editRange := completionRange(line, prefixStart, character)
+	snippets := s.SnippetSupport()
 	items := make([]protocol.CompletionItem, 0, len(symbols))
 	for _, sym := range symbols {
 		kind := completionItemKindFor(sym.Kind)
-		items = append(items, protocol.CompletionItem{
+		item := protocol.CompletionItem{
 			Label:    sym.Name,
 			Kind:     &kind,
 			TextEdit: &protocol.TextEdit{Range: editRange, NewText: sym.Name},
-		})
+		}
+		if sym.Kind == sv.KindFunction || sym.Kind == sv.KindTask {
+			detail := subprogramDetail(sym)
+			item.Detail = &detail
+			if snippets {
+				format := protocol.InsertTextFormatSnippet
+				item.InsertTextFormat = &format
+				item.TextEdit = &protocol.TextEdit{Range: editRange, NewText: callSnippet(sym)}
+			}
+		}
+		items = append(items, item)
 	}
 	return items, truncated
+}
+
+// subprogramDetail renders a function/task's signature for a completion
+// item's detail line: "<return type> (<args>)", or just "(<args>)" for a
+// task or a function with an implicit return type.
+func subprogramDetail(sym sv.Symbol) string {
+	args := "(" + argSummary(sym.Args) + ")"
+	if sym.ReturnType == "" {
+		return args
+	}
+	return sym.ReturnType + " " + args
+}
+
+// callSnippet builds the snippet inserted for a function/task: its name
+// followed by a parenthesized list of one placeholder per argument, or
+// "($0)" when it takes none.
+func callSnippet(sym sv.Symbol) string {
+	if len(sym.Args) == 0 {
+		return sym.Name + "($0)"
+	}
+	placeholders := make([]string, len(sym.Args))
+	for i, a := range sym.Args {
+		placeholders[i] = fmt.Sprintf("${%d:%s}", i+1, snippetEscape(a.Name))
+	}
+	return sym.Name + "(" + strings.Join(placeholders, ", ") + ")"
+}
+
+// snippetEscape escapes the characters that are special inside a snippet
+// placeholder.
+func snippetEscape(s string) string {
+	return strings.NewReplacer(`\`, `\\`, `$`, `\$`, `}`, `\}`).Replace(s)
 }
 
 func completionRange(line, start, end int) protocol.Range {

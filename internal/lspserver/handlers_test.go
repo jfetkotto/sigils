@@ -1609,3 +1609,83 @@ func TestInitializeReportsTheBuildVersion(t *testing.T) {
 		t.Fatalf("serverInfo = %+v, want name %q and version %q", info, ServerName, serverVersion())
 	}
 }
+
+func TestTextDocumentCompletionFunctionShowsArguments(t *testing.T) {
+	src := `function int add_nums(input int a, input int b);
+  return a + b;
+endfunction
+task add_task(int x);
+endtask
+function void add_none();
+endfunction
+module top;
+  add_
+endmodule
+`
+	for _, snippetSupport := range []bool{false, true} {
+		s := newTestServer()
+		if snippetSupport {
+			var params protocol.InitializeParams
+			raw := `{"capabilities":{"textDocument":{"completion":{"completionItem":{"snippetSupport":true}}}}}`
+			if err := json.Unmarshal([]byte(raw), &params); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = s.Shutdown(nil) })
+			if _, err := s.Initialize(nil, &params); err != nil {
+				t.Fatalf("Initialize: %v", err)
+			}
+		}
+		uri := "file:///a.sv"
+		if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+			TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+		}); err != nil {
+			t.Fatalf("DidOpen: %v", err)
+		}
+		result, err := s.TextDocumentCompletion(nil, &protocol.CompletionParams{
+			TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+				TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+				Position:     protocol.Position{Line: 8, Character: 6},
+			},
+		})
+		if err != nil {
+			t.Fatalf("TextDocumentCompletion: %v", err)
+		}
+		items, _ := result.([]protocol.CompletionItem)
+		type want struct{ detail, plain, snippet string }
+		wants := map[string]want{
+			"add_nums": {"int (input int a, input int b)", "add_nums", "add_nums(${1:a}, ${2:b})"},
+			"add_task": {"(int x)", "add_task", "add_task(${1:x})"},
+			"add_none": {"void ()", "add_none", "add_none($0)"},
+		}
+		if len(items) != len(wants) {
+			t.Fatalf("snippets=%v: got %d items, want %d: %#v", snippetSupport, len(items), len(wants), items)
+		}
+		for _, item := range items {
+			w, ok := wants[item.Label]
+			if !ok {
+				t.Fatalf("unexpected item %q", item.Label)
+			}
+			gotDetail := "<nil>"
+			if item.Detail != nil {
+				gotDetail = *item.Detail
+			}
+			if gotDetail != w.detail {
+				t.Fatalf("snippets=%v %s: detail = %q, want %q", snippetSupport, item.Label, gotDetail, w.detail)
+			}
+			edit, _ := item.TextEdit.(*protocol.TextEdit)
+			if edit == nil {
+				t.Fatalf("%s: missing TextEdit", item.Label)
+			}
+			wantText, wantFormat := w.plain, false
+			if snippetSupport {
+				wantText, wantFormat = w.snippet, true
+			}
+			if edit.NewText != wantText {
+				t.Fatalf("snippets=%v %s: newText = %q, want %q", snippetSupport, item.Label, edit.NewText, wantText)
+			}
+			if gotFormat := item.InsertTextFormat != nil && *item.InsertTextFormat == protocol.InsertTextFormatSnippet; gotFormat != wantFormat {
+				t.Fatalf("snippets=%v %s: snippet format = %v, want %v", snippetSupport, item.Label, gotFormat, wantFormat)
+			}
+		}
+	}
+}
