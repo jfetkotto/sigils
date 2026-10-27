@@ -40,6 +40,7 @@ func main() {
 		TextDocumentDefinition:        lspserver.Guard(log, srv.TextDocumentDefinition),
 		TextDocumentDeclaration:       lspserver.Guard(log, srv.TextDocumentDeclaration),
 		TextDocumentCompletion:        lspserver.Guard(log, srv.TextDocumentCompletion),
+		TextDocumentSignatureHelp:     lspserver.Guard(log, srv.TextDocumentSignatureHelp),
 		TextDocumentDocumentSymbol:    lspserver.Guard(log, srv.TextDocumentDocumentSymbol),
 		TextDocumentFoldingRange:      lspserver.Guard(log, srv.TextDocumentFoldingRange),
 		WorkspaceSymbol:               lspserver.Guard(log, srv.WorkspaceSymbol),

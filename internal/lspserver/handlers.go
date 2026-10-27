@@ -105,6 +105,10 @@ func (s *Server) Initialize(glspCtx *glsp.Context, params *protocol.InitializePa
 			CompletionProvider: &protocol.CompletionOptions{
 				TriggerCharacters: []string{"."},
 			},
+			SignatureHelpProvider: &protocol.SignatureHelpOptions{
+				TriggerCharacters:   []string{"(", ","},
+				RetriggerCharacters: []string{")"},
+			},
 			DocumentSymbolProvider:    true,
 			FoldingRangeProvider:      true,
 			WorkspaceSymbolProvider:   true,
