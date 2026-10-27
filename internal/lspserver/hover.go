@@ -224,11 +224,7 @@ func hoverText(d sv.Declaration) string {
 		if d.Prototype {
 			b.WriteString("extern ")
 		}
-		if d.ReturnType() != "" {
-			fmt.Fprintf(&b, "%s %s %s(%s)", d.Kind, d.ReturnType(), d.Name, argSummary(d.Args()))
-		} else {
-			fmt.Fprintf(&b, "%s %s(%s)", d.Kind, d.Name, argSummary(d.Args()))
-		}
+		b.WriteString(subprogramSignature(d))
 	case sv.KindPort, sv.KindVariable, sv.KindArgument:
 		b.WriteString(portEntry(sv.Port{Name: d.Name, Detail: d.Detail}))
 	case sv.KindParameter:
@@ -375,6 +371,16 @@ func typedefText(d sv.Declaration) string {
 	default:
 		return fmt.Sprintf("typedef %s", d.Name)
 	}
+}
+
+// subprogramSignature renders a function/task declaration's header as
+// "function <ret> name(<args>)" (no return type for a task or an implicit
+// one).
+func subprogramSignature(d sv.Declaration) string {
+	if d.ReturnType() != "" {
+		return fmt.Sprintf("%s %s %s(%s)", d.Kind, d.ReturnType(), d.Name, argSummary(d.Args()))
+	}
+	return fmt.Sprintf("%s %s(%s)", d.Kind, d.Name, argSummary(d.Args()))
 }
 
 // argSummary renders a function/task's argument list as "detail name,
