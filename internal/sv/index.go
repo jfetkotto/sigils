@@ -27,6 +27,12 @@ type Location struct {
 type Symbol struct {
 	Name string
 	Kind Kind
+
+	// ReturnType and Args are only set for a function or task (see
+	// Declaration.ReturnType and Declaration.Args), so completion can show
+	// its signature and insert a call with argument placeholders.
+	ReturnType string
+	Args       []Port
 }
 
 // SymbolLocation is a workspace symbol search result: a name, its kind,
@@ -2021,7 +2027,8 @@ func (ix *Index) CompleteSymbols(prefix string, limit int) (syms []Symbol, trunc
 			return syms, true
 		}
 		ref := ix.primaryRefLocked(ix.byName[names[i]])
-		syms = append(syms, Symbol{Name: names[i], Kind: ix.fileLocked(ref.uri).decls[ref.idx].Kind})
+		d := &ix.fileLocked(ref.uri).decls[ref.idx]
+		syms = append(syms, Symbol{Name: names[i], Kind: d.Kind, ReturnType: d.ReturnType(), Args: d.Args()})
 	}
 	return syms, false
 }

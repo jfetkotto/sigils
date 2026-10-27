@@ -2594,3 +2594,30 @@ func TestSetFileReplacesOnlyItsOwnByNameEntries(t *testing.T) {
 		t.Fatalf("x still declared in %v after every declaration was removed", got)
 	}
 }
+
+func TestCompleteSymbolsCarriesSubprogramSignature(t *testing.T) {
+	ix := NewIndex()
+	ix.SetFile("file:///a.sv", `function int add_nums(input int a, input int b);
+  return a + b;
+endfunction
+task add_task(int x);
+endtask
+logic add_var;
+`)
+
+	got := map[string]Symbol{}
+	for _, s := range mustCompleteSymbols(ix, "add_") {
+		got[s.Name] = s
+	}
+	fn := got["add_nums"]
+	if fn.ReturnType != "int" || len(fn.Args) != 2 || fn.Args[0].Name != "a" || fn.Args[1].Name != "b" {
+		t.Fatalf("add_nums = %+v, want return type int and args a, b", fn)
+	}
+	task := got["add_task"]
+	if task.ReturnType != "" || len(task.Args) != 1 || task.Args[0].Name != "x" {
+		t.Fatalf("add_task = %+v, want no return type and arg x", task)
+	}
+	if v := got["add_var"]; v.ReturnType != "" || v.Args != nil {
+		t.Fatalf("add_var = %+v, want no signature for a variable", v)
+	}
+}
