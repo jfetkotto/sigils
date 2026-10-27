@@ -1689,3 +1689,81 @@ endmodule
 		}
 	}
 }
+
+func TestTextDocumentSignatureHelp(t *testing.T) {
+	src := `function int add_nums(input int a, input int b);
+  return a + b;
+endfunction
+task do_it(int x);
+endtask
+module top;
+  leaf u0 (
+  );
+  initial begin
+    add_nums(1, 2);
+    add_nums(.b(1), .a(2));
+    do_it(3);
+  end
+endmodule
+`
+	s := newTestServer()
+	uri := "file:///a.sv"
+	if err := s.TextDocumentDidOpen(nil, &protocol.DidOpenTextDocumentParams{
+		TextDocument: protocol.TextDocumentItem{URI: uri, LanguageID: "systemverilog", Version: 1, Text: src},
+	}); err != nil {
+		t.Fatalf("DidOpen: %v", err)
+	}
+	help := func(line, character int) *protocol.SignatureHelp {
+		t.Helper()
+		res, err := s.TextDocumentSignatureHelp(nil, &protocol.SignatureHelpParams{
+			TextDocumentPositionParams: protocol.TextDocumentPositionParams{
+				TextDocument: protocol.TextDocumentIdentifier{URI: uri},
+				Position:     protocol.Position{Line: protocol.UInteger(line), Character: protocol.UInteger(character)},
+			},
+		})
+		if err != nil {
+			t.Fatalf("TextDocumentSignatureHelp: %v", err)
+		}
+		return res
+	}
+
+	// "    add_nums(1, 2);" -- cursor after "1, " is in the second argument.
+	got := help(9, 17)
+	if got == nil || len(got.Signatures) != 1 {
+		t.Fatalf("expected one signature, got %+v", got)
+	}
+	sig := got.Signatures[0]
+	if sig.Label != "function int add_nums(input int a, input int b)" {
+		t.Fatalf("label = %q", sig.Label)
+	}
+	if len(sig.Parameters) != 2 || sig.Parameters[1].Label != "input int b" {
+		t.Fatalf("parameters = %+v", sig.Parameters)
+	}
+	if got.ActiveParameter == nil || *got.ActiveParameter != 1 {
+		t.Fatalf("active parameter = %v, want 1", got.ActiveParameter)
+	}
+
+	// Named argument ".a(" in "    add_nums(.b(1), .a(2));" binds the first formal.
+	got = help(10, 23)
+	if got == nil || got.ActiveParameter == nil || *got.ActiveParameter != 0 {
+		t.Fatalf("named-argument active parameter = %+v, want 0", got)
+	}
+
+	// Task call, first argument.
+	got = help(11, 10)
+	if got == nil || got.Signatures[0].Label != "task do_it(int x)" || *got.ActiveParameter != 0 {
+		t.Fatalf("task signature help = %+v", got)
+	}
+
+	// Outside any call, and inside an instantiation's parens: no signature.
+	if got = help(9, 4); got != nil {
+		t.Fatalf("expected nil outside a call, got %+v", got)
+	}
+	if got = help(7, 2); got != nil {
+		t.Fatalf("expected nil inside an instantiation, got %+v", got)
+	}
+	// Inside the function declaration's own header: no signature.
+	if got = help(0, 26); got != nil {
+		t.Fatalf("expected nil inside a declaration header, got %+v", got)
+	}
+}
